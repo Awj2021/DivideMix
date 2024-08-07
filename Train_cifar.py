@@ -12,9 +12,16 @@ import numpy as np
 from PreResNet import *
 from sklearn.mixture import GaussianMixture
 import dataloader_cifar as dataloader
+import wandb
+
+
+# TODO: requirements for environment.
+# TODO: setting the GMM to GPU.
+# TODO: image size of dataset.
+# TODO: add the wandb for logging.
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
-parser.add_argument('--batch_size', default=64, type=int, help='train batchsize') 
+parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
 parser.add_argument('--noise_mode',  default='sym')
 parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
@@ -25,10 +32,11 @@ parser.add_argument('--num_epochs', default=300, type=int)
 parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
 parser.add_argument('--id', default='')
 parser.add_argument('--seed', default=123)
-parser.add_argument('--gpuid', default=0, type=int)
+parser.add_argument('--gpuid', default=1, type=int)
 parser.add_argument('--num_class', default=10, type=int)
-parser.add_argument('--data_path', default='./cifar-10', type=str, help='path to dataset')
+parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
+parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -36,12 +44,18 @@ random.seed(args.seed)
 torch.manual_seed(args.seed)
 torch.cuda.manual_seed_all(args.seed)
 
+if not os.path.exists(args.data_path):
+    os.makedirs(args.data_path)
+
+# running name should include the dataset and the noise mode.
+running_name = args.dataset + '_' + args.noise_mode + '_' + str(args.r) + '_' + str(args.batch_size) + '_' + str(args.lr)
+wandb.init(project=args.project_name, name=running_name, config=args)
 
 # Training
 def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     net.train()
     net2.eval() #fix one network and train the other
-    
+      
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
     for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):      
@@ -115,7 +129,8 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
+
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()})
         sys.stdout.write('\r')
         sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
                 %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
@@ -137,6 +152,7 @@ def warmup(epoch,net,optimizer,dataloader):
         L.backward()  
         optimizer.step() 
 
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()})
         sys.stdout.write('\r')
         sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
                 %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
@@ -158,6 +174,7 @@ def test(epoch,net1,net2):
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()                 
     acc = 100.*correct/total
+    wandb.log({'epoch': epoch, 'Accuracy': acc})
     print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
     test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
     test_log.flush()  
@@ -212,8 +229,8 @@ def create_model():
     model = model.cuda()
     return model
 
-stats_log=open('./checkpoint/%s_%.1f_%s'%(args.dataset,args.r,args.noise_mode)+'_stats.txt','w') 
-test_log=open('./checkpoint/%s_%.1f_%s'%(args.dataset,args.r,args.noise_mode)+'_acc.txt','w')     
+stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
+test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
 
 if args.dataset=='cifar10':
     warm_up = 10
@@ -243,7 +260,7 @@ for epoch in range(args.num_epochs+1):
     lr=args.lr
     if epoch >= 150:
         lr /= 10      
-    for param_group in optimizer1.param_groups:
+    for param_group in optimizer1.param_groups: # what's the aim of these 4 lines?
         param_group['lr'] = lr       
     for param_group in optimizer2.param_groups:
         param_group['lr'] = lr          
@@ -258,7 +275,7 @@ for epoch in range(args.num_epochs+1):
         warmup(epoch,net2,optimizer2,warmup_trainloader) 
    
     else:         
-        prob1,all_loss[0]=eval_train(net1,all_loss[0])   
+        prob1,all_loss[0]=eval_train(net1,all_loss[0])   # The probability is calculated when evaluating. 
         prob2,all_loss[1]=eval_train(net2,all_loss[1])          
                
         pred1 = (prob1 > args.p_threshold)      
@@ -271,6 +288,10 @@ for epoch in range(args.num_epochs+1):
         print('\nTrain Net2')
         labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
+    # Save the model as the last one model. 
+    if epoch == args.num_epochs:
+        torch.save(net1.state_dict(),'./checkpoint/'+running_name+'_last_net1.pth')
+        torch.save(net2.state_dict(),'./checkpoint/'+running_name+'_last_net2.pth')
 
     test(epoch,net1,net2)  
 

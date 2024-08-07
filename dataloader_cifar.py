@@ -1,5 +1,6 @@
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
+import torchvision.datasets as datasets
 import random
 import numpy as np
 from PIL import Image
@@ -7,6 +8,7 @@ import json
 import os
 import torch
 from torchnet.meter import AUCMeter
+import ipdb
 
             
 def unpickle(file):
@@ -22,7 +24,20 @@ class cifar_dataset(Dataset):
         self.transform = transform
         self.mode = mode  
         self.transition = {0:0,2:0,4:7,7:7,1:1,9:1,3:5,5:3,6:6,8:8} # class transition for asymmetric noise
-     
+        # add the code for downloading the dataset.
+        if not os.path.exists(root_dir):
+            os.makedirs(root_dir)
+        # ipdb.set_trace()
+        if dataset=='cifar10' and not os.path.exists('%s/cifar-10-batches-py'%root_dir):
+            os.system('wget -O %s/cifar-10-python.tar.gz https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz'%root_dir)
+            os.system('tar -xzvf %s/cifar-10-python.tar.gz -C %s'%(root_dir, root_dir))
+        if dataset=='cifar100' and not os.path.exists('%s/cifar-100-python'%root_dir):
+            os.system('wget -O %s/cifar-100-python.tar.gz https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz'%root_dir)
+            os.system('tar -xzvf %s/cifar-100-python.tar.gz -C %s'%(root_dir, root_dir))
+            
+            # there is another way to download the dataset using torchvision.datasets.
+            # datasets.CIFAR10(root_dir, train=True, download=True)
+
         if self.mode=='test':
             if dataset=='cifar10':                
                 test_dic = unpickle('%s/test_batch'%root_dir)

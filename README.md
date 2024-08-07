@@ -1,4 +1,12 @@
 # DivideMix: Learning with Noisy Labels as Semi-supervised Learning
+
+## TODO
+- Running the original Code for noisy labels datasets. like Cifar10.
+- Code modification:
+    - Add the wandb log file.
+    - Add the GMM into GPU.
+- Running the modified version for training the multi-labels.
+
 PyTorch Code for the following paper at ICLR2020:\
 <b>Title</b>: <i>DivideMix: Learning with Noisy Labels as Semi-supervised Learning</i> <a href="https://openreview.net/pdf?id=HJgExaVtwr">[pdf]</a>\
 <b>Authors</b>:Junnan Li, Richard Socher, Steven C.H. Hoi\
@@ -11,8 +19,21 @@ Deep neural networks are known to be annotation-hungry. Numerous efforts have be
 
 <b>Illustration</b>\
 <img src="./img/framework.png">
+### <b>Environment</b>  
+Since the original source code didn't tell environment setting. So I need to 
+try the environment setting and record all the steps here.  
+```
+conda create -n divide python=3.8
+<!-- conda install pytorch==1.8.1 torchvision==0.9.1 torchaudio==0.8.1 cudatoolkit=11.3 -c pytorch -c conda-forge -->
+conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6 -c pytorch -c conda-forge
+conda install numpy==1.19.5
+conda install scikit-learn==0.24.1  
+pip install ipdb
 
-<b>Experiments</b>\
+```
+
+
+### <b>Experiments</b>
 First, please create a folder named <i>checkpoint</i> to store the results.\
 <code>mkdir checkpoint</code>\
 Next, run \
