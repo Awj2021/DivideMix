@@ -10,10 +10,10 @@ import os
 import argparse
 import numpy as np
 from PreResNet import *
-from sklearn.mixture import GaussianMixture
+# from sklearn.mixture import GaussianMixture
 import dataloader_cifar as dataloader
 import wandb
-
+from pycave.bayes import GaussianMixture
 
 # TODO: requirements for environment.
 # TODO: setting the GMM to GPU.
@@ -200,7 +200,8 @@ def eval_train(model,all_loss):
         input_loss = losses.reshape(-1,1)
     
     # fit a two-component GMM to the loss
-    gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
+    # gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
+    gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
     gmm.fit(input_loss)
     prob = gmm.predict_proba(input_loss) 
     prob = prob[:,gmm.means_.argmin()]         

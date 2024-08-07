@@ -28,7 +28,8 @@ conda create -n divide python=3.8
 conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6 -c pytorch -c conda-forge
 conda install numpy==1.19.5
 conda install scikit-learn==0.24.1  
-pip install ipdb
+pip install ipdb  
+pip install pycave # used for running the GMM on GPU.
 
 ```
 

@@ -157,16 +157,29 @@ class cifar_dataloader():
         self.log = log
         self.noise_file = noise_file
         if self.dataset=='cifar10':
+            # self.transform_train = transforms.Compose([
+            #         transforms.RandomCrop(32, padding=4),
+            #         transforms.RandomHorizontalFlip(),
+            #         transforms.ToTensor(),
+            #         transforms.Normalize((0.4914, 0.4822, 0.4465),(0.2023, 0.1994, 0.2010)),
+            #     ]) 
+            # self.transform_test = transforms.Compose([
+            #         transforms.ToTensor(),
+            #         transforms.Normalize((0.4914, 0.4822, 0.4465),(0.2023, 0.1994, 0.2010)),
+            #     ])    
+
+            # FIXME: following the unionnet code of cifar10n transform.
             self.transform_train = transforms.Compose([
-                    transforms.RandomCrop(32, padding=4),
                     transforms.RandomHorizontalFlip(),
+                    transforms.RandomCrop(32, padding=4),
                     transforms.ToTensor(),
-                    transforms.Normalize((0.4914, 0.4822, 0.4465),(0.2023, 0.1994, 0.2010)),
-                ]) 
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
+                ])
             self.transform_test = transforms.Compose([
                     transforms.ToTensor(),
-                    transforms.Normalize((0.4914, 0.4822, 0.4465),(0.2023, 0.1994, 0.2010)),
-                ])    
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
+                ])
+
         elif self.dataset=='cifar100':    
             self.transform_train = transforms.Compose([
                     transforms.RandomCrop(32, padding=4),
