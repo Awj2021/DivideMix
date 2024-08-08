@@ -10,10 +10,11 @@ import os
 import argparse
 import numpy as np
 from PreResNet import *
-# from sklearn.mixture import GaussianMixture
+from sklearn.mixture import GaussianMixture
 import dataloader_cifar as dataloader
 import wandb
-from pycave.bayes import GaussianMixture
+import ipdb
+# from pycave.bayes import GaussianMixture
 
 # TODO: requirements for environment.
 # TODO: setting the GMM to GPU.
@@ -58,21 +59,22 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
       
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
-    for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):      
+    for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):  # labels_x is the target label.    
         try:
             inputs_u, inputs_u2 = unlabeled_train_iter.next()
         except:
             unlabeled_train_iter = iter(unlabeled_trainloader)
-            inputs_u, inputs_u2 = unlabeled_train_iter.next()                 
+            inputs_u, inputs_u2 = unlabeled_train_iter.next()          # Get two different unlabeled samples.But from the dataloader, the images are the same.       
         batch_size = inputs_x.size(0)
         
         # Transform label to one-hot
+        # FIXME: check the dimension of the labels_x.
         labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)        
         w_x = w_x.view(-1,1).type(torch.FloatTensor) 
 
         inputs_x, inputs_x2, labels_x, w_x = inputs_x.cuda(), inputs_x2.cuda(), labels_x.cuda(), w_x.cuda()
         inputs_u, inputs_u2 = inputs_u.cuda(), inputs_u2.cuda()
-
+        # ipdb.set_trace()
         with torch.no_grad():
             # label co-guessing of unlabeled samples
             outputs_u11 = net(inputs_u)
@@ -84,7 +86,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
             ptu = pu**(1/args.T) # temparature sharpening
             
             targets_u = ptu / ptu.sum(dim=1, keepdim=True) # normalize
-            targets_u = targets_u.detach()       
+            targets_u = targets_u.detach()       # shape: (batch_size, num_class)
             
             # label refinement of labeled samples
             outputs_x = net(inputs_x)
@@ -97,24 +99,25 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
             targets_x = ptx / ptx.sum(dim=1, keepdim=True) # normalize           
             targets_x = targets_x.detach()       
         
+        # ipdb.set_trace()
         # mixmatch
         l = np.random.beta(args.alpha, args.alpha)        
         l = max(l, 1-l)
                 
-        all_inputs = torch.cat([inputs_x, inputs_x2, inputs_u, inputs_u2], dim=0)
-        all_targets = torch.cat([targets_x, targets_x, targets_u, targets_u], dim=0)
+        all_inputs = torch.cat([inputs_x, inputs_x2, inputs_u, inputs_u2], dim=0) # shape: (4*batch_size, 3, 32, 32)
+        all_targets = torch.cat([targets_x, targets_x, targets_u, targets_u], dim=0) # shape: (4*batch_size, num_class)
 
-        idx = torch.randperm(all_inputs.size(0))
+        idx = torch.randperm(all_inputs.size(0)) # generate the random index.
 
         input_a, input_b = all_inputs, all_inputs[idx]
         target_a, target_b = all_targets, all_targets[idx]
         
-        mixed_input = l * input_a + (1 - l) * input_b        
-        mixed_target = l * target_a + (1 - l) * target_b
+        mixed_input = l * input_a + (1 - l) * input_b       
+        mixed_target = l * target_a + (1 - l) * target_b # The ground truth labels of mixed data for calculating the loss.
                 
         logits = net(mixed_input)
-        logits_x = logits[:batch_size*2]
-        logits_u = logits[batch_size*2:]        
+        logits_x = logits[:batch_size*2] # refer to the all_inputs. [inputs_x, inputs_x2, xxx]
+        logits_u = logits[batch_size*2:] # refer to the all_inputs. [xxx, xxx, inputs_u, inputs_u2]
            
         Lx, Lu, lamb = criterion(logits_x, mixed_target[:batch_size*2], logits_u, mixed_target[batch_size*2:], epoch+batch_idx/num_iter, warm_up)
         
@@ -188,10 +191,10 @@ def eval_train(model,all_loss):
             outputs = model(inputs) 
             loss = CE(outputs, targets)  
             for b in range(inputs.size(0)):
-                losses[index[b]]=loss[b]         
-    losses = (losses-losses.min())/(losses.max()-losses.min())    
+                losses[index[b]]=loss[b]  # save the loss for each sample.        
+    losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
     all_loss.append(losses)
-
+    # ema
     if args.r==0.9: # average loss over last 5 epochs to improve convergence stability
         history = torch.stack(all_loss)
         input_loss = history[-5:].mean(0)
@@ -200,11 +203,13 @@ def eval_train(model,all_loss):
         input_loss = losses.reshape(-1,1)
     
     # fit a two-component GMM to the loss
-    # gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
-    gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
+    gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
+    # gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
     gmm.fit(input_loss)
-    prob = gmm.predict_proba(input_loss) 
-    prob = prob[:,gmm.means_.argmin()]         
+    prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
+    # TODO: check the dimension of the prob.
+    # ipdb.set_trace()
+    prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
     return prob,all_loss
 
 def linear_rampup(current, warm_up, rampup_length=16):
@@ -261,7 +266,7 @@ for epoch in range(args.num_epochs+1):
     lr=args.lr
     if epoch >= 150:
         lr /= 10      
-    for param_group in optimizer1.param_groups: # what's the aim of these 4 lines?
+    for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
         param_group['lr'] = lr       
     for param_group in optimizer2.param_groups:
         param_group['lr'] = lr          
@@ -277,10 +282,10 @@ for epoch in range(args.num_epochs+1):
    
     else:         
         prob1,all_loss[0]=eval_train(net1,all_loss[0])   # The probability is calculated when evaluating. 
-        prob2,all_loss[1]=eval_train(net2,all_loss[1])          
+        prob2,all_loss[1]=eval_train(net2,all_loss[1])   # Use the all train_data and the noisy labels.        
                
-        pred1 = (prob1 > args.p_threshold)      
-        pred2 = (prob2 > args.p_threshold)      
+        pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
+        pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
         labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2) # co-divide

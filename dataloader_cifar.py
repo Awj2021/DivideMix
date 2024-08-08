@@ -100,7 +100,7 @@ class cifar_dataset(Dataset):
                     pred_idx = pred.nonzero()[0]
                     self.probability = [probability[i] for i in pred_idx]   
                     
-                    clean = (np.array(noise_label)==np.array(train_label))                                                       
+                    clean = (np.array(noise_label)==np.array(train_label))  # noisy_label includes all the labels of cifar10 or cifar100.                                                     
                     auc_meter = AUCMeter()
                     auc_meter.reset()
                     auc_meter.add(probability,clean)        
@@ -109,7 +109,7 @@ class cifar_dataset(Dataset):
                     log.flush()      
                     
                 elif self.mode == "unlabeled":
-                    pred_idx = (1-pred).nonzero()[0]                                               
+                    pred_idx = (1-pred).nonzero()[0]  # why it looks like this?                                       
                 
                 self.train_data = train_data[pred_idx]
                 self.noise_label = [noise_label[i] for i in pred_idx]                          
@@ -125,7 +125,7 @@ class cifar_dataset(Dataset):
         elif self.mode=='unlabeled':
             img = self.train_data[index]
             img = Image.fromarray(img)
-            img1 = self.transform(img) 
+            img1 = self.transform(img)  # why return two images?
             img2 = self.transform(img) 
             return img1, img2
         elif self.mode=='all':
