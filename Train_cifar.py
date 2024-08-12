@@ -16,21 +16,16 @@ import wandb
 import ipdb
 # from pycave.bayes import GaussianMixture
 
-# TODO: requirements for environment.
 # TODO: setting the GMM to GPU.
-# TODO: image size of dataset.
-# TODO: add the wandb for logging.
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
-parser.add_argument('--noise_mode',  default='sym')
 parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
 parser.add_argument('--lambda_u', default=25, type=float, help='weight for unsupervised loss')
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
 parser.add_argument('--num_epochs', default=300, type=int)
-parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
 parser.add_argument('--id', default='')
 parser.add_argument('--seed', default=123)
 parser.add_argument('--gpuid', default=1, type=int)
@@ -38,6 +33,9 @@ parser.add_argument('--num_class', default=10, type=int)
 parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
+parser.add_argument('--noise_file', default='CIFAR-10_human.pt', type=str, help='name of the noise file.')
+parser.add_argument('--warm_up_epochs', default=10, type=int, help='number of warm-up epochs.')
+
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -49,14 +47,15 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + args.noise_mode + '_' + str(args.r) + '_' + str(args.batch_size) + '_' + str(args.lr)
+running_name = args.dataset + '_' + str(args.batch_size) + '_' + str(args.lr)
 wandb.init(project=args.project_name, name=running_name, config=args)
 
 # Training
-def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
+def train(epoch,net,net2,net3,optimizer,labeled_trainloader,unlabeled_trainloader):
     net.train()
     net2.eval() #fix one network and train the other
-      
+    net3.eval()
+
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
     for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):  # labels_x is the target label.    
@@ -67,22 +66,25 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
             inputs_u, inputs_u2 = unlabeled_train_iter.next()          # Get two different unlabeled samples.But from the dataloader, the images are the same.       
         batch_size = inputs_x.size(0)
         
-        # Transform label to one-hot
-        # FIXME: check the dimension of the labels_x.
-        labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)        
+        labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)        # convert the labels to one-hot encoding.
         w_x = w_x.view(-1,1).type(torch.FloatTensor) 
 
         inputs_x, inputs_x2, labels_x, w_x = inputs_x.cuda(), inputs_x2.cuda(), labels_x.cuda(), w_x.cuda()
         inputs_u, inputs_u2 = inputs_u.cuda(), inputs_u2.cuda()
-        # ipdb.set_trace()
         with torch.no_grad():
             # label co-guessing of unlabeled samples
             outputs_u11 = net(inputs_u)
             outputs_u12 = net(inputs_u2)
             outputs_u21 = net2(inputs_u)
-            outputs_u22 = net2(inputs_u2)            
-            
-            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1)) / 4       
+            outputs_u22 = net2(inputs_u2)
+            outputs_u31 = net3(inputs_u)
+            outputs_u32 = net3(inputs_u2)
+
+            # FIXME: Check the outputs of the network.          
+            # TODO: 1. Seperately calculate the pu for net2 and net3. And then average the pu.
+            # TODO: 2. Seperately calculate the px for net2 and net3. And then find the overlap of the pus to get a new pu.
+            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u21, dim=1) \
+                  + torch.softmax(outputs_u22, dim=1) + torch.softmax(outputs_u31, dim=1) + torch.softmax(outputs_u32, dim=1)) / 6       
             ptu = pu**(1/args.T) # temparature sharpening
             
             targets_u = ptu / ptu.sum(dim=1, keepdim=True) # normalize
@@ -99,7 +101,6 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
             targets_x = ptx / ptx.sum(dim=1, keepdim=True) # normalize           
             targets_x = targets_x.detach()       
         
-        # ipdb.set_trace()
         # mixmatch
         l = np.random.beta(args.alpha, args.alpha)        
         l = max(l, 1-l)
@@ -135,43 +136,49 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
 
         wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()})
         sys.stdout.write('\r')
-        sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
-                %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
+        sys.stdout.write('%s: Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
+                %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
         sys.stdout.flush()
 
-def warmup(epoch,net,optimizer,dataloader):
+def warmup(epoch,net,optimizer,dataloader): # annotator=0, 1, 2 for cifair10.
     net.train()
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
-    for batch_idx, (inputs, labels, path) in enumerate(dataloader):      
+    for batch_idx, (inputs, labels, _) in enumerate(dataloader):     
+        # how to convert the labels into one-hot encoding?
+        # FIXME: check the dimension of the labels.
+        labels = torch.zeros(inputs.size(0), args.num_class).scatter_(1, labels.view(-1,1), 1) # convert the labels to one-hot encoding.
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
         outputs = net(inputs)               
         loss = CEloss(outputs, labels)      
-        if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-            penalty = conf_penalty(outputs)
-            L = loss + penalty      
-        elif args.noise_mode=='sym':   
-            L = loss
+        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
+        #     penalty = conf_penalty(outputs)
+        #     L = loss + penalty      
+        # elif args.noise_mode=='sym':   
+        L = loss
         L.backward()  
         optimizer.step() 
 
         wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()})
         sys.stdout.write('\r')
-        sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
-                %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
+        sys.stdout.write('%s: Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
+                %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
         sys.stdout.flush()
 
-def test(epoch,net1,net2):
+def test(epoch,net1,net2, net3):
     net1.eval()
     net2.eval()
+    net3.eval()
     correct = 0
     total = 0
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)
-            outputs2 = net2(inputs)           
-            outputs = outputs1+outputs2
+            outputs2 = net2(inputs)
+            outputs3 = net3(inputs)           
+            outputs = outputs1+outputs2+outputs3 # shape: (batch_size, num_class)
+            # TODO: please make sure the outputs are the sum of the three networks.
             _, predicted = torch.max(outputs, 1)            
                        
             total += targets.size(0)
@@ -182,35 +189,44 @@ def test(epoch,net1,net2):
     test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
     test_log.flush()  
 
-def eval_train(model,all_loss):    
+# TODO: use the trained model to evaluate the other two labels. And get the overlap of the clean samples.
+def eval_train(model, annotator=0):    
     model.eval()
-    losses = torch.zeros(50000)    
-    with torch.no_grad():
-        for batch_idx, (inputs, targets, index) in enumerate(eval_loader):
-            inputs, targets = inputs.cuda(), targets.cuda() 
-            outputs = model(inputs) 
-            loss = CE(outputs, targets)  
-            for b in range(inputs.size(0)):
-                losses[index[b]]=loss[b]  # save the loss for each sample.        
-    losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
-    all_loss.append(losses)
-    # ema
-    if args.r==0.9: # average loss over last 5 epochs to improve convergence stability
-        history = torch.stack(all_loss)
-        input_loss = history[-5:].mean(0)
-        input_loss = input_loss.reshape(-1,1)
+    eval_loader_list = []
+    probs = []
+    if annotator==0:
+        eval_loader_list = [eval_loader_2, eval_loader_3]
+    elif annotator==1:
+        eval_loader_list = [eval_loader_1, eval_loader_3]
+    elif annotator==2:
+        eval_loader_list = [eval_loader_1, eval_loader_2]
     else:
+        raise ValueError('The annotator is not valid.')
+    
+    for eval_loader in eval_loader_list:
+        losses = torch.zeros(50000)    
+        with torch.no_grad():
+            for batch_idx, (inputs, targets, index) in enumerate(eval_loader):
+                targets = torch.zeros(inputs.size(0), args.num_class).scatter_(1, targets.view(-1,1), 1) 
+                inputs, targets = inputs.cuda(), targets.cuda() 
+                outputs = model(inputs) 
+                loss = CE(outputs, targets)  
+                for b in range(inputs.size(0)):
+                    losses[index[b]]=loss[b]  # save the loss for each sample.        
+        losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
+        # all_loss[annotator].append(losses)
+    
         input_loss = losses.reshape(-1,1)
     
-    # fit a two-component GMM to the loss
-    gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
-    # gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
-    gmm.fit(input_loss)
-    prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
-    # TODO: check the dimension of the prob.
-    # ipdb.set_trace()
-    prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
-    return prob,all_loss
+        # fit a two-component GMM to the loss
+        print('GMM fitting on the model %d using other two dataset..'%(annotator + 1))
+        gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
+        # gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
+        gmm.fit(input_loss)
+        prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
+        prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
+        probs.append(prob)
+    return probs
 
 def linear_rampup(current, warm_up, rampup_length=16):
     current = np.clip((current-warm_up) / rampup_length, 0.0, 1.0)
@@ -238,29 +254,30 @@ def create_model():
 stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
 test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
 
-if args.dataset=='cifar10':
-    warm_up = 10
-elif args.dataset=='cifar100':
-    warm_up = 30
+# if args.dataset=='cifar10':
+#     warm_up = a
+# elif args.dataset=='cifar100':
+#     warm_up = 30
+warm_up = args.warm_up_epochs
 
-loader = dataloader.cifar_dataloader(args.dataset,r=args.r,noise_mode=args.noise_mode,batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path,log=stats_log,noise_file='%s/%.1f_%s.json'%(args.data_path,args.r,args.noise_mode))
+loader = dataloader.cifar_dataloader(args.dataset,batch_size=args.batch_size,num_workers=5,\
+    root_dir=args.data_path,log=stats_log, noise_file=args.noise_file) # need to modify the noise_file.
 
-print('| Building net')
+print('*************** Building net ****************')
 net1 = create_model()
 net2 = create_model()
+net3 = create_model()
 cudnn.benchmark = True
 
 criterion = SemiLoss()
 optimizer1 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+optimizer3 = optim.SGD(net3.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
-if args.noise_mode=='asym':
-    conf_penalty = NegEntropy()
 
-all_loss = [[],[]] # save the history of losses from two networks
+all_loss = [[],[],[]] # save the history of losses from two networks
 
 for epoch in range(args.num_epochs+1):   
     lr=args.lr
@@ -269,36 +286,63 @@ for epoch in range(args.num_epochs+1):
     for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
         param_group['lr'] = lr       
     for param_group in optimizer2.param_groups:
-        param_group['lr'] = lr          
+        param_group['lr'] = lr
+    for param_group in optimizer3.param_groups:
+        param_group['lr'] = lr        
     test_loader = loader.run('test')
-    eval_loader = loader.run('eval_train')   
+    eval_loader_1 = loader.run('eval_train', annotator=0)
+    eval_loader_2 = loader.run('eval_train', annotator=1)
+    eval_loader_3 = loader.run('eval_train', annotator=2)   
     
-    if epoch<warm_up:       
-        warmup_trainloader = loader.run('warmup')
+    if epoch<warm_up:
+        print(' =========== Warming up the networks...')
+        # ipdb.set_trace()       
         print('Warmup Net1')
-        warmup(epoch,net1,optimizer1,warmup_trainloader)    
+        warmup_trainloader_1 = loader.run('warmup', annotator=0) # warmup net1
+        warmup(epoch,net1,optimizer1,warmup_trainloader_1)   
+
         print('\nWarmup Net2')
-        warmup(epoch,net2,optimizer2,warmup_trainloader) 
+        warmup_trainloader_2 = loader.run('warmup', annotator=1) # warmup net2
+        warmup(epoch,net2,optimizer2,warmup_trainloader_2) 
+
+        print('\nWarmup Net3')
+        warmup_trainloader_3 = loader.run('warmup', annotator=2) # warmup net3
+        warmup(epoch,net3,optimizer3,warmup_trainloader_3)
    
     else:         
-        prob1,all_loss[0]=eval_train(net1,all_loss[0])   # The probability is calculated when evaluating. 
-        prob2,all_loss[1]=eval_train(net2,all_loss[1])   # Use the all train_data and the noisy labels.        
+        probs_2_3 = eval_train(net1, annotator=0)   # The probability is calculated when evaluating. 
+        probs_1_3 = eval_train(net2, annotator=1)   # Use the all train_data and the noisy labels.     
+        probs_1_2 = eval_train(net3, annotator=2)   # Use the all train_data and the noisy labels.   
                
-        pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
-        pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
+        pred_2_3 = [(prob > args.p_threshold) for prob in probs_2_3]      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
+        pred_1_3 = [(prob > args.p_threshold) for prob in probs_1_3]      # The list of pred only contains the True or False.
+        pred_1_2 = [(prob > args.p_threshold) for prob in probs_1_2]     # pred1.shape: (50000,)  prob1.shape: (50000,)
         
+        # ipdb.set_trace()
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2) # co-divide
-        train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
+        # pred_overlap_23 = pred2 & pred3
+        pred_overlap_23 = pred_2_3[0] & pred_2_3[1]
+        prob_overlap_23 = (probs_2_3[0] + probs_2_3[1]) / 2
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred_overlap_23,prob_overlap_23,annotator=0) # co-divide
+        train(epoch,net1,net2,net3,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
-        train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
+        pred_overlap_13 = pred_1_3[0] & pred_1_3[1]
+        prob_overlap_13 = (probs_1_3[0] + probs_1_3[1]) / 2
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred_overlap_13,prob_overlap_13,annotator=1) # co-divide
+        train(epoch,net2,net1,net3,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2 
+        
+        print('\nTrain Net3')  
+        pred_overlap_12 = pred_1_2[0] & pred_1_2[1]
+        prob_overlap_12 = (probs_1_2[0] + probs_1_2[1]) / 2
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred_overlap_12,prob_overlap_12,annotator=2) # co-divide
+        train(epoch,net3,net1,net2, optimizer3,labeled_trainloader, unlabeled_trainloader) # train net3.
     # Save the model as the last one model. 
     if epoch == args.num_epochs:
         torch.save(net1.state_dict(),'./checkpoint/'+running_name+'_last_net1.pth')
         torch.save(net2.state_dict(),'./checkpoint/'+running_name+'_last_net2.pth')
+        torch.save(net3.state_dict(),'./checkpoint/'+running_name+'_last_net3.pth')
 
-    test(epoch,net1,net2)  
+    test(epoch,net1,net2,net3)  
 
 
