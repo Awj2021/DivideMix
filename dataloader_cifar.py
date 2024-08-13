@@ -18,12 +18,11 @@ def unpickle(file):
     return dict
 
 class cifar_dataset(Dataset): 
-    def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], log=''): 
-        
-        self.r = r # noise ratio
-        self.transform = transform
-        self.mode = mode  
-        self.transition = {0:0,2:0,4:7,7:7,1:1,9:1,3:5,5:3,6:6,8:8} # class transition for asymmetric noise
+    def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], log='', annotator=0): 
+        self.r = r
+        self.mode = mode
+        self.transform = transform  
+        self.annotator = annotator
         # add the code for downloading the dataset.
         if not os.path.exists(root_dir):
             os.makedirs(root_dir)
@@ -53,44 +52,32 @@ class cifar_dataset(Dataset):
                 self.test_label = test_dic['fine_labels']                            
         else:    
             train_data=[]
-            train_label=[]
+            train_clean_label=[] # clean label is the list.
             if dataset=='cifar10': 
                 for n in range(1,6):
                     dpath = '%s/data_batch_%d'%(root_dir,n)
                     data_dic = unpickle(dpath)
                     train_data.append(data_dic['data'])
-                    train_label = train_label+data_dic['labels']
+                    train_clean_label = train_clean_label+data_dic['labels']
                 train_data = np.concatenate(train_data)
             elif dataset=='cifar100':    
                 train_dic = unpickle('%s/train'%root_dir)
                 train_data = train_dic['data']
-                train_label = train_dic['fine_labels']
+                train_clean_label = train_dic['fine_labels']
             train_data = train_data.reshape((50000, 3, 32, 32))
             train_data = train_data.transpose((0, 2, 3, 1))
-
-            if os.path.exists(noise_file):
-                noise_label = json.load(open(noise_file,"r"))
-            else:    #inject noise   
-                noise_label = []
-                idx = list(range(50000))
-                random.shuffle(idx)
-                num_noise = int(self.r*50000)            
-                noise_idx = idx[:num_noise]
-                for i in range(50000):
-                    if i in noise_idx:
-                        if noise_mode=='sym':
-                            if dataset=='cifar10': 
-                                noiselabel = random.randint(0,9)
-                            elif dataset=='cifar100':    
-                                noiselabel = random.randint(0,99)
-                            noise_label.append(noiselabel)
-                        elif noise_mode=='asym':   
-                            noiselabel = self.transition[train_label[i]]
-                            noise_label.append(noiselabel)                    
-                    else:    
-                        noise_label.append(train_label[i])   
-                print("save noisy labels to %s ..."%noise_file)        
-                json.dump(noise_label,open(noise_file,"w"))       
+            
+            if os.path.exists(os.path.join(root_dir, noise_file)):
+                multi_rater = torch.load(os.path.join(root_dir, noise_file))
+                multi_rater_labels = np.stack((multi_rater['random_label1'],
+                                                  multi_rater['random_label2'],
+                                                  multi_rater['random_label3']), axis=0)
+                multi_rater_labels = np.transpose(multi_rater_labels)  # shape: (50000, 3)
+            else:
+                raise ValueError('Multi Rater file not found, please check the path: {}'.format(noise_file))
+             
+            noise_label = multi_rater_labels[:, self.annotator]  # shape: (50000,) 
+            # ipdb.set_trace()
             
             if self.mode == 'all':
                 self.train_data = train_data
@@ -100,7 +87,7 @@ class cifar_dataset(Dataset):
                     pred_idx = pred.nonzero()[0]
                     self.probability = [probability[i] for i in pred_idx]   
                     
-                    clean = (np.array(noise_label)==np.array(train_label))  # noisy_label includes all the labels of cifar10 or cifar100.                                                     
+                    clean = (np.array(noise_label)==np.array(train_clean_label))  # noisy_label includes all the labels of cifar10 or cifar100.                                                     
                     auc_meter = AUCMeter()
                     auc_meter.reset()
                     auc_meter.add(probability,clean)        
@@ -191,9 +178,9 @@ class cifar_dataloader():
                     transforms.ToTensor(),
                     transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276)),
                 ])   
-    def run(self,mode,pred=[],prob=[]):
+    def run(self,mode,pred=[],prob=[], annotator=0):
         if mode=='warmup':
-            all_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="all",noise_file=self.noise_file)                
+            all_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="all",noise_file=self.noise_file, annotator=annotator)                
             trainloader = DataLoader(
                 dataset=all_dataset, 
                 batch_size=self.batch_size*2,
@@ -202,14 +189,14 @@ class cifar_dataloader():
             return trainloader
                                      
         elif mode=='train':
-            labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="labeled", noise_file=self.noise_file, pred=pred, probability=prob,log=self.log)              
+            labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="labeled", noise_file=self.noise_file, pred=pred, probability=prob,log=self.log,annotator=annotator)              
             labeled_trainloader = DataLoader(
                 dataset=labeled_dataset, 
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers)   
             
-            unlabeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="unlabeled", noise_file=self.noise_file, pred=pred)                    
+            unlabeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="unlabeled", noise_file=self.noise_file, pred=pred, annotator=annotator)                    
             unlabeled_trainloader = DataLoader(
                 dataset=unlabeled_dataset, 
                 batch_size=self.batch_size,
@@ -218,7 +205,7 @@ class cifar_dataloader():
             return labeled_trainloader, unlabeled_trainloader
         
         elif mode=='test':
-            test_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='test')      
+            test_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='test', annotator=annotator)      
             test_loader = DataLoader(
                 dataset=test_dataset, 
                 batch_size=self.batch_size,
@@ -227,7 +214,7 @@ class cifar_dataloader():
             return test_loader
         
         elif mode=='eval_train':
-            eval_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='all', noise_file=self.noise_file)      
+            eval_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='all', noise_file=self.noise_file, annotator=annotator)      
             eval_loader = DataLoader(
                 dataset=eval_dataset, 
                 batch_size=self.batch_size,

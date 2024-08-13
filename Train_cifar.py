@@ -20,7 +20,7 @@ import ipdb
 # TODO: setting the GMM to GPU.
 # TODO: image size of dataset.
 # TODO: add the wandb for logging.
-
+ 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
@@ -38,6 +38,10 @@ parser.add_argument('--num_class', default=10, type=int)
 parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
+parser.add_argument('--noise_file', default='CIFAR-10_human.pt', type=str, help='name of the noise file.')
+parser.add_argument('--warm_up_epochs', default=10, type=int, help='number of warm-up epochs.')
+parser.add_argument('--annotator', default=0, type=int, help='No. of annotators.')
+
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -49,7 +53,7 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + args.noise_mode + '_' + str(args.r) + '_' + str(args.batch_size) + '_' + str(args.lr)
+running_name = args.dataset + '_' + str(args.batch_size) + '_' + str(args.lr) + '_' + str(args.annotator)
 wandb.init(project=args.project_name, name=running_name, config=args)
 
 # Training
@@ -135,8 +139,8 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
 
         wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()})
         sys.stdout.write('\r')
-        sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
-                %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
+        sys.stdout.write('%s:  Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
+                %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
         sys.stdout.flush()
 
 def warmup(epoch,net,optimizer,dataloader):
@@ -147,18 +151,18 @@ def warmup(epoch,net,optimizer,dataloader):
         optimizer.zero_grad()
         outputs = net(inputs)               
         loss = CEloss(outputs, labels)      
-        if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-            penalty = conf_penalty(outputs)
-            L = loss + penalty      
-        elif args.noise_mode=='sym':   
-            L = loss
+        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
+        #     penalty = conf_penalty(outputs)
+        #     L = loss + penalty      
+        # elif args.noise_mode=='sym':   
+        L = loss
         L.backward()  
         optimizer.step() 
 
         wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()})
         sys.stdout.write('\r')
-        sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
-                %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
+        sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
+                %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
         sys.stdout.flush()
 
 def test(epoch,net1,net2):
@@ -199,7 +203,7 @@ def eval_train(model,all_loss):
         history = torch.stack(all_loss)
         input_loss = history[-5:].mean(0)
         input_loss = input_loss.reshape(-1,1)
-    else:
+    else: 
         input_loss = losses.reshape(-1,1)
     
     # fit a two-component GMM to the loss
@@ -238,15 +242,16 @@ def create_model():
 stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
 test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
 
-if args.dataset=='cifar10':
-    warm_up = 10
-elif args.dataset=='cifar100':
-    warm_up = 30
+# if args.dataset=='cifar10':
+#     warm_up = 
+# elif args.dataset=='cifar100':
+#     warm_up = 30
+warm_up = args.warm_up_epochs
 
-loader = dataloader.cifar_dataloader(args.dataset,r=args.r,noise_mode=args.noise_mode,batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path,log=stats_log,noise_file='%s/%.1f_%s.json'%(args.data_path,args.r,args.noise_mode))
+loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
+    root_dir=args.data_path,log=stats_log,noise_file=args.noise_file)
 
-print('| Building net')
+print('****** Building net ******')
 net1 = create_model()
 net2 = create_model()
 cudnn.benchmark = True
@@ -257,8 +262,8 @@ optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay
 
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
-if args.noise_mode=='asym':
-    conf_penalty = NegEntropy()
+# if args.noise_mode=='asym':
+#     conf_penalty = NegEntropy()
 
 all_loss = [[],[]] # save the history of losses from two networks
 
@@ -271,10 +276,10 @@ for epoch in range(args.num_epochs+1):
     for param_group in optimizer2.param_groups:
         param_group['lr'] = lr          
     test_loader = loader.run('test')
-    eval_loader = loader.run('eval_train')   
+    eval_loader = loader.run('eval_train', args.annotator)   
     
     if epoch<warm_up:       
-        warmup_trainloader = loader.run('warmup')
+        warmup_trainloader = loader.run('warmup', args.annotator)
         print('Warmup Net1')
         warmup(epoch,net1,optimizer1,warmup_trainloader)    
         print('\nWarmup Net2')
@@ -288,11 +293,11 @@ for epoch in range(args.num_epochs+1):
         pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2) # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2, args.annotator) # co-divide
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1, args.annotator) # co-divide
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
     # Save the model as the last one model. 
     if epoch == args.num_epochs:
