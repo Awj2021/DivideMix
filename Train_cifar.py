@@ -19,8 +19,7 @@ import ipdb
 # TODO: requirements for environment.
 # TODO: setting the GMM to GPU.
 # TODO: image size of dataset.
-# TODO: add the wandb for logging.
-
+ 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
@@ -29,7 +28,6 @@ parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
 parser.add_argument('--lambda_u', default=25, type=float, help='weight for unsupervised loss')
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
-parser.add_argument('--num_epochs', default=300, type=int)
 parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
 parser.add_argument('--id', default='')
 parser.add_argument('--seed', default=123)
@@ -38,6 +36,13 @@ parser.add_argument('--num_class', default=10, type=int)
 parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
+parser.add_argument('--noise_file', default='CIFAR-10_human.pt', type=str, help='name of the noise file.')
+parser.add_argument('--num_epochs', default=300, type=int)
+parser.add_argument('--warm_up_epochs', default=30, type=int, help='number of warm-up epochs.')
+parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
+parser.add_argument('--annotator', default='random_label1', type=str, help='name of the annotator.')
+
+
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -49,8 +54,8 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + args.noise_mode + '_' + str(args.r) + '_' + str(args.batch_size) + '_' + str(args.lr)
-wandb.init(project=args.project_name, name=running_name, config=args)
+running_name = args.dataset + '_' + str(args.batch_size) + '_' + str(args.lr) + '_' + str(args.annotator)
+wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
 def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
@@ -133,10 +138,10 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         loss.backward()
         optimizer.step()
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()})
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()}) if args.wandb else None
         sys.stdout.write('\r')
-        sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
-                %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
+        sys.stdout.write('%s:  Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
+                %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
         sys.stdout.flush()
 
 def warmup(epoch,net,optimizer,dataloader):
@@ -147,18 +152,18 @@ def warmup(epoch,net,optimizer,dataloader):
         optimizer.zero_grad()
         outputs = net(inputs)               
         loss = CEloss(outputs, labels)      
-        if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-            penalty = conf_penalty(outputs)
-            L = loss + penalty      
-        elif args.noise_mode=='sym':   
-            L = loss
+        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
+        #     penalty = conf_penalty(outputs)
+        #     L = loss + penalty      
+        # elif args.noise_mode=='sym':   
+        L = loss
         L.backward()  
         optimizer.step() 
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()})
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
         sys.stdout.write('\r')
-        sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
-                %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
+        sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
+                %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
         sys.stdout.flush()
 
 def test(epoch,net1,net2):
@@ -177,7 +182,7 @@ def test(epoch,net1,net2):
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()                 
     acc = 100.*correct/total
-    wandb.log({'epoch': epoch, 'Accuracy': acc})
+    wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
     print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
     test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
     test_log.flush()  
@@ -199,7 +204,7 @@ def eval_train(model,all_loss):
         history = torch.stack(all_loss)
         input_loss = history[-5:].mean(0)
         input_loss = input_loss.reshape(-1,1)
-    else:
+    else: 
         input_loss = losses.reshape(-1,1)
     
     # fit a two-component GMM to the loss
@@ -238,15 +243,12 @@ def create_model():
 stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
 test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
 
-if args.dataset=='cifar10':
-    warm_up = 10
-elif args.dataset=='cifar100':
-    warm_up = 30
+warm_up = args.warm_up_epochs
 
-loader = dataloader.cifar_dataloader(args.dataset,r=args.r,noise_mode=args.noise_mode,batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path,log=stats_log,noise_file='%s/%.1f_%s.json'%(args.data_path,args.r,args.noise_mode))
+loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
+    root_dir=args.data_path,log=stats_log,noise_file=args.noise_file, annotator=args.annotator)
 
-print('| Building net')
+print('****** Building net ******')
 net1 = create_model()
 net2 = create_model()
 cudnn.benchmark = True
@@ -257,15 +259,15 @@ optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay
 
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
-if args.noise_mode=='asym':
-    conf_penalty = NegEntropy()
+# if args.noise_mode=='asym':
+#     conf_penalty = NegEntropy()
 
 all_loss = [[],[]] # save the history of losses from two networks
 
 for epoch in range(args.num_epochs+1):   
     lr=args.lr
-    if epoch >= 150:
-        lr /= 10      
+    if epoch % 100 == 0 and epoch>0:
+        lr /= 5      
     for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
         param_group['lr'] = lr       
     for param_group in optimizer2.param_groups:
