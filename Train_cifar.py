@@ -38,6 +38,7 @@ parser.add_argument('--num_class', default=10, type=int)
 parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
+parser.add_argument('--wandb', action='store_true', help='use wandb to log the results.')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -50,7 +51,7 @@ if not os.path.exists(args.data_path):
 
 # running name should include the dataset and the noise mode.
 running_name = args.dataset + '_' + args.noise_mode + '_' + str(args.r) + '_' + str(args.batch_size) + '_' + str(args.lr)
-wandb.init(project=args.project_name, name=running_name, config=args)
+wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
 def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
@@ -133,7 +134,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         loss.backward()
         optimizer.step()
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()})
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()}) if args.wandb else None
         sys.stdout.write('\r')
         sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
                 %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
@@ -155,7 +156,7 @@ def warmup(epoch,net,optimizer,dataloader):
         L.backward()  
         optimizer.step() 
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()})
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
         sys.stdout.write('\r')
         sys.stdout.write('%s:%.1f-%s | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
                 %(args.dataset, args.r, args.noise_mode, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
@@ -177,7 +178,7 @@ def test(epoch,net1,net2):
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()                 
     acc = 100.*correct/total
-    wandb.log({'epoch': epoch, 'Accuracy': acc})
+    wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
     print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
     test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
     test_log.flush()  
@@ -272,7 +273,7 @@ for epoch in range(args.num_epochs+1):
         param_group['lr'] = lr          
     test_loader = loader.run('test')
     eval_loader = loader.run('eval_train')   
-    
+    wandb.log({'epoch': epoch, 'lr': lr}) if args.wandb else None # log the learning rate.
     if epoch<warm_up:       
         warmup_trainloader = loader.run('warmup')
         print('Warmup Net1')
