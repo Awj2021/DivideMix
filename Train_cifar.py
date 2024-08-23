@@ -14,6 +14,7 @@ from sklearn.mixture import GaussianMixture
 import dataloader_cifar as dataloader
 import wandb
 import ipdb
+import math
 # from pycave.bayes import GaussianMixture
 
 # TODO: requirements for environment.
@@ -25,7 +26,7 @@ parser.add_argument('--batch_size', default=128, type=int, help='train batchsize
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
 parser.add_argument('--noise_mode',  default='sym')
 parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
-parser.add_argument('--lambda_u', default=25, type=float, help='weight for unsupervised loss')
+parser.add_argument('--lambda_u', default=0, type=float, help='weight for unsupervised loss')
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
 parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
@@ -41,7 +42,10 @@ parser.add_argument('--num_epochs', default=300, type=int)
 parser.add_argument('--warm_up_epochs', default=30, type=int, help='number of warm-up epochs.')
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
 parser.add_argument('--annotator', default='random_label1', type=str, help='name of the annotator.')
-
+parser.add_argument('--model', default='resnet18', type=str, help='name of the model.')
+parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
+parser.add_argument('--cosine', action='store_true', default=False,
+                    help='use cosine lr schedule')
 
 args = parser.parse_args()
 
@@ -54,7 +58,7 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + str(args.batch_size) + '_' + str(args.lr) + '_' + str(args.annotator)
+running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.annotator) + '_lambda_u_' + str(args.lambda_u) 
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -138,7 +142,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         loss.backward()
         optimizer.step()
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item()}) if args.wandb else None
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item(), 'lamb': lamb}) if args.wandb else None
         sys.stdout.write('\r')
         sys.stdout.write('%s:  Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.2f  Unlabeled loss: %.2f'
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item()))
@@ -214,7 +218,9 @@ def eval_train(model,all_loss):
     prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
     # TODO: check the dimension of the prob.
     # ipdb.set_trace()
+    # cluster_means = torch.mean(prob, dim=0)  # calculate the mean of the two clusters. Shape: (2,)
     prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
+    # prob = prob[:,cluster_means.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,)
     return prob,all_loss
 
 def linear_rampup(current, warm_up, rampup_length=16):
@@ -236,9 +242,33 @@ class NegEntropy(object):
         return torch.mean(torch.sum(probs.log()*probs, dim=1))
 
 def create_model():
-    model = ResNet18(num_classes=args.num_class)
+    if args.model == 'resnet18':
+        model = ResNet18(num_classes=args.num_class)
+    elif args.model == 'resnet34':
+        model = ResNet34(num_classes=args.num_class)
+    elif args.model == 'resnet50':
+        model = ResNet50(num_classes=args.num_class)
+    else:
+        raise ValueError('Model not supported.')
     model = model.cuda()
     return model
+
+# Below function is copied from the official implementation of ProMix.
+def adjust_learning_rate(args, optimizer, epoch):
+    lr = args.lr
+    if args.cosine:
+        eta_min = lr * (args.lr_decay_rate ** 3)
+        lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / args.num_epochs)) / 2
+    # else:
+    #     steps = np.sum(epoch > np.asarray(args.lr_decay_epochs))
+    #     if steps > 0:
+    #         lr = lr * (args.lr_decay_rate ** steps)
+    else:
+        if epoch%150==0 and epoch>0:  # put the original learning rate here. Just for 300 epochs.
+            lr *= args.lr_decay_rate
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
 
 stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
 test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
@@ -265,13 +295,15 @@ CEloss = nn.CrossEntropyLoss()
 all_loss = [[],[]] # save the history of losses from two networks
 
 for epoch in range(args.num_epochs+1):   
-    lr=args.lr
-    if epoch % 100 == 0 and epoch>0:
-        lr /= 5      
-    for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
-        param_group['lr'] = lr       
-    for param_group in optimizer2.param_groups:
-        param_group['lr'] = lr          
+    # lr=args.lr
+    # if epoch % 150 == 0 and epoch>0:
+    #     lr /= 10
+    adjust_learning_rate(args, optimizer1, epoch)
+    adjust_learning_rate(args, optimizer2, epoch)      
+    # for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
+    #     param_group['lr'] = lr       
+    # for param_group in optimizer2.param_groups:
+    #     param_group['lr'] = lr          
     test_loader = loader.run('test')
     eval_loader = loader.run('eval_train')   
     

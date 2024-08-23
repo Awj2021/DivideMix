@@ -81,6 +81,7 @@ class cifar_dataset(Dataset):
             else:                   
                 if self.mode == "labeled":
                     pred_idx = pred.nonzero()[0]
+                    # pred_idx = np.where(pred)[0]
                     self.probability = [probability[i] for i in pred_idx]   
                     
                     clean = (np.array(noise_label)==np.array(train_clean_label))  # noisy_label includes all the labels of cifar10 or cifar100.                                                     
@@ -93,7 +94,8 @@ class cifar_dataset(Dataset):
                     log.flush()      
                     
                 elif self.mode == "unlabeled":
-                    pred_idx = (1-pred).nonzero()[0]  # why it looks like this?                                       
+                    pred_idx = (1-pred).nonzero()[0]  # why it looks like this?   
+                    # pred_idx = np.where(~pred)[0]                                    
                 
                 self.train_data = train_data[pred_idx]
                 self.noise_label = [noise_label[i] for i in pred_idx]                          
