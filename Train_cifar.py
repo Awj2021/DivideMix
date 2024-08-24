@@ -58,7 +58,7 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.annotator) + '_lambda_u_' + str(args.lambda_u) 
+running_name = 'two_labels' + '_' + args.dataset + '_' + args.model + '_' + str(args.batch_size)
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -191,7 +191,10 @@ def test(epoch,net1,net2):
     test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
     test_log.flush()  
 
-def eval_train(model,all_loss):    
+def eval_train(model, eval_loader):  
+    """
+    model & annotator: net2 for annotator1 | net1 for annotator2.
+    """  
     model.eval()
     losses = torch.zeros(50000)    
     with torch.no_grad():
@@ -202,26 +205,23 @@ def eval_train(model,all_loss):
             for b in range(inputs.size(0)):
                 losses[index[b]]=loss[b]  # save the loss for each sample.        
     losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
-    all_loss.append(losses)
+    # all_loss.append(losses)
     # ema
-    if args.r==0.9: # average loss over last 5 epochs to improve convergence stability
-        history = torch.stack(all_loss)
-        input_loss = history[-5:].mean(0)
-        input_loss = input_loss.reshape(-1,1)
-    else: 
-        input_loss = losses.reshape(-1,1)
-    
-    # fit a two-component GMM to the loss
+    # if args.r==0.9: # average loss over last 5 epochs to improve convergence stability
+    #     history = torch.stack(all_loss)
+    #     input_loss = history[-5:].mean(0)
+    #     input_loss = input_loss.reshape(-1,1)
+    # else: 
+    input_loss = losses.reshape(-1,1)
     gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
-    # gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
+    # gmm = GaussianMixture(num_components=2, covariance_type='full')
     gmm.fit(input_loss)
     prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
-    # TODO: check the dimension of the prob.
     # ipdb.set_trace()
     # cluster_means = torch.mean(prob, dim=0)  # calculate the mean of the two clusters. Shape: (2,)
     prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
     # prob = prob[:,cluster_means.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,)
-    return prob,all_loss
+    return prob
 
 def linear_rampup(current, warm_up, rampup_length=16):
     current = np.clip((current-warm_up) / rampup_length, 0.0, 1.0)
@@ -276,7 +276,7 @@ test_log=open('./checkpoint/'+running_name+'_acc.txt','w')
 warm_up = args.warm_up_epochs
 
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path,log=stats_log,noise_file=args.noise_file, annotator=args.annotator)
+    root_dir=args.data_path,log=stats_log,noise_file=args.noise_file)
 
 print('****** Building net ******')
 net1 = create_model()
@@ -292,7 +292,7 @@ CEloss = nn.CrossEntropyLoss()
 # if args.noise_mode=='asym':
 #     conf_penalty = NegEntropy()
 
-all_loss = [[],[]] # save the history of losses from two networks
+# all_loss = [[],[]] # save the history of losses from two networks
 
 for epoch in range(args.num_epochs+1):   
     # lr=args.lr
@@ -305,33 +305,37 @@ for epoch in range(args.num_epochs+1):
     # for param_group in optimizer2.param_groups:
     #     param_group['lr'] = lr          
     test_loader = loader.run('test')
-    eval_loader = loader.run('eval_train')   
+    eval_loader_1 = loader.run('eval_train', annotator='random_label1')
+    eval_loader_2 = loader.run('eval_train', annotator='random_label2')   
     
     if epoch<warm_up:       
-        warmup_trainloader = loader.run('warmup')
+        warmup_trainloader_1 = loader.run('warmup', annotator='random_label1')
         print('Warmup Net1')
-        warmup(epoch,net1,optimizer1,warmup_trainloader)    
+        warmup(epoch,net1,optimizer1,warmup_trainloader_1)    
+        
         print('\nWarmup Net2')
-        warmup(epoch,net2,optimizer2,warmup_trainloader) 
+        warmup_trainloader_2 = loader.run('warmup', annotator='random_label2')
+        warmup(epoch,net2,optimizer2,warmup_trainloader_2) 
    
-    else:         
-        prob1,all_loss[0]=eval_train(net1,all_loss[0])   # The probability is calculated when evaluating. 
-        prob2,all_loss[1]=eval_train(net2,all_loss[1])   # Use the all train_data and the noisy labels.        
+    else:
+        # net1 is used for testing the net2 and vice versa.         
+        prob2 = eval_train(net1, eval_loader=eval_loader_2)   # The probability is calculated when evaluating. 
+        prob1 = eval_train(net2, eval_loader=eval_loader_1)   # Use the all train_data and the noisy labels.        
                
         pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
         pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2) # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1,annotator='random_label1') # co-divide
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2, annotator='random_label2') # co-divide
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
     # Save the model as the last one model. 
     if epoch == args.num_epochs:
-        torch.save(net1.state_dict(),'./checkpoint/'+running_name+'_last_net1.pth')
-        torch.save(net2.state_dict(),'./checkpoint/'+running_name+'_last_net2.pth')
+        torch.save(net1.state_dict(),'./checkpoint/'+ args.project_name + '_' + running_name+'_last_net1.pth')
+        torch.save(net2.state_dict(),'./checkpoint/'+ args.project_name + '_' + running_name+'_last_net2.pth')
 
     test(epoch,net1,net2)  
 
