@@ -58,7 +58,7 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
 # running name should include the dataset and the noise mode.
-running_name = 'two_labels' + '_' + args.dataset + '_' + args.model + '_' + str(args.batch_size)
+running_name = 'two_labels' + '_' + args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(27_8_2024)
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -319,18 +319,18 @@ for epoch in range(args.num_epochs+1):
    
     else:
         # net1 is used for testing the net2 and vice versa.         
-        prob2 = eval_train(net1, eval_loader=eval_loader_2)   # The probability is calculated when evaluating. 
-        prob1 = eval_train(net2, eval_loader=eval_loader_1)   # Use the all train_data and the noisy labels.        
+        prob1 = eval_train(net1, eval_loader=eval_loader_2)   # The probability is calculated when evaluating. 
+        prob2 = eval_train(net2, eval_loader=eval_loader_1)   # Use the all train_data and the noisy labels.        
                
         pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
         pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1,annotator='random_label1') # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2,annotator='random_label1') # co-divide
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2, annotator='random_label2') # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1, annotator='random_label2') # co-divide
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
     # Save the model as the last one model. 
     if epoch == args.num_epochs:
