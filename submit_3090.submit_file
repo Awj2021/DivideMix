@@ -1,7 +1,7 @@
 JobBatchName = "cifar10_one_annotator$(cluster)"
 
 executable = /bin/bash
-arguments = /mnt/fast/nobackup/scratch4weeks/wa00433/projects/DivideMix/run.sh $(lambda_u) $(process)
+arguments = /mnt/fast/nobackup/scratch4weeks/wa00433/projects/DivideMix/run.sh $(epochs) $(process)
 
 universe         = docker
 docker_image     = nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
@@ -40,6 +40,7 @@ request_memory   = 32G
 
 +CanCheckpoint = true
 
-queue 1 lambda_u in 1,2,5
+#queue 1 lambda_u in 1,2,5
 #queue 1 T_max in 200, 300, 600
 #queue 1 batch_size in 128
+queue 1 epochs in 300, 600
