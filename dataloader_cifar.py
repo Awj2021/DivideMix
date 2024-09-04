@@ -19,7 +19,7 @@ def unpickle(file):
     return dict
 
 class cifar_dataset(Dataset): 
-    def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], log='', annotator=''): 
+    def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], annotator=''): 
         self.r = r
         self.mode = mode
         self.transform = transform  
@@ -90,8 +90,6 @@ class cifar_dataset(Dataset):
                     auc_meter.add(probability,clean)        
                     auc,_,_ = auc_meter.value()
                     wandb.log({'Num_Labeled_Samples': pred.sum(), 'AUC': auc})
-                    log.write('Numer of labeled samples:%d   AUC:%.3f\n'%(pred.sum(),auc))
-                    log.flush()      
                     
                 elif self.mode == "unlabeled":
                     pred_idx = (1-pred).nonzero()[0]  # why it looks like this?   
@@ -133,14 +131,13 @@ class cifar_dataset(Dataset):
         
         
 class cifar_dataloader():  
-    def __init__(self, dataset, r, noise_mode, batch_size, num_workers, root_dir, log, noise_file='', annotator=''):
+    def __init__(self, dataset, r, noise_mode, batch_size, num_workers, root_dir, noise_file='', annotator=''):
         self.dataset = dataset
         self.r = r
         self.noise_mode = noise_mode
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.root_dir = root_dir
-        self.log = log
         self.noise_file = noise_file
         self.annotator = annotator
         if self.dataset=='cifar10':
@@ -155,17 +152,6 @@ class cifar_dataloader():
                     transforms.Normalize((0.4914, 0.4822, 0.4465),(0.2023, 0.1994, 0.2010)),
                 ])    
 
-            # FIXME: following the unionnet code of cifar10n transform.
-            # self.transform_train = transforms.Compose([
-            #         transforms.RandomHorizontalFlip(),
-            #         transforms.RandomCrop(32, padding=4),
-            #         transforms.ToTensor(),
-            #         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
-            #     ])
-            # self.transform_test = transforms.Compose([
-            #         transforms.ToTensor(),
-            #         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
-            #     ])
 
         elif self.dataset=='cifar100':    
             self.transform_train = transforms.Compose([
@@ -189,7 +175,7 @@ class cifar_dataloader():
             return trainloader
                                      
         elif mode=='train':
-            labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="labeled", noise_file=self.noise_file, pred=pred, probability=prob,log=self.log, annotator=self.annotator)              
+            labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="labeled", noise_file=self.noise_file, pred=pred, probability=prob, annotator=self.annotator)              
             labeled_trainloader = DataLoader(
                 dataset=labeled_dataset, 
                 batch_size=self.batch_size,

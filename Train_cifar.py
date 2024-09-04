@@ -175,21 +175,25 @@ def test(epoch,net1,net2):
     net2.eval()
     correct = 0
     total = 0
+    global best_acc
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)
-            outputs2 = net2(inputs)           
+            outputs2 = net2(inputs)
             outputs = outputs1+outputs2
             _, predicted = torch.max(outputs, 1)            
                        
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()                 
     acc = 100.*correct/total
+    if acc > best_acc:
+        best_acc = acc
+        best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(round(best_acc, 3)) + str(epoch) + '_best.pth') 
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
+        print('Saving Best Model to %s \n' % best_checkpoint)
     wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
     print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
-    test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
-    test_log.flush()  
 
 def eval_train(model,all_loss):    
     model.eval()
@@ -270,13 +274,10 @@ def adjust_learning_rate(args, optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
-test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
-
 warm_up = args.warm_up_epochs
 
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path,log=stats_log,noise_file=args.noise_file, annotator=args.annotator)
+    root_dir=args.data_path,noise_file=args.noise_file, annotator=args.annotator)
 
 print('****** Building net ******')
 net1 = create_model()
@@ -289,8 +290,11 @@ optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay
 
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
-# if args.noise_mode=='asym':
-#     conf_penalty = NegEntropy()
+
+best_acc = 0
+# Check the directory of saving models.
+if not os.path.exists(args.project_name):
+    os.makedirs(args.project_name)
 
 all_loss = [[],[]] # save the history of losses from two networks
 
@@ -329,10 +333,9 @@ for epoch in range(args.num_epochs+1):
         labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
     # Save the model as the last one model. 
-    if epoch == args.num_epochs:
-        torch.save(net1.state_dict(),'./checkpoint/'+running_name+'_last_net1.pth')
-        torch.save(net2.state_dict(),'./checkpoint/'+running_name+'_last_net2.pth')
-
     test(epoch,net1,net2)  
+    if epoch == args.num_epochs:
+        last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
 
 
