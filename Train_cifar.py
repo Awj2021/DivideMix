@@ -41,7 +41,8 @@ parser.add_argument('--noise_file', default='Regenerated_Simulated_Human.pt', ty
 parser.add_argument('--num_epochs', default=300, type=int)
 parser.add_argument('--warm_up_epochs', default=30, type=int, help='number of warm-up epochs.')
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
-parser.add_argument('--annotator', default='random_label1', type=str, help='name of the annotator.')
+# parser.add_argument('--annotator', default='random_label1', type=str, help='name of the annotator.')
+parser.add_argument('--annotator', default='', type=str, help='name of the annotator.')
 parser.add_argument('--model', default='resnet18', type=str, help='name of the model.')
 parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
 parser.add_argument('--cosine', action='store_true', default=False,
@@ -57,8 +58,18 @@ torch.cuda.manual_seed_all(args.seed)
 if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
+# if len(args.annotator) != 2:
+#     raise ValueError('The number of annotator should be 2.')
+if args.annotator == 'random_label1_2':
+    annotators = ['random_label1', 'random_label2']
+elif args.annotator == 'random_label1_3':
+    annotators = ['random_label1', 'random_label3']
+elif args.annotator == 'random_label2_3':
+    annotators = ['random_label2', 'random_label3']
+else:
+    raise ValueError('The annotator should be specified.')
 # running name should include the dataset and the noise mode.
-running_name = 'two_labels' + '_' + args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(27_8_2024)
+running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + args.annotator[0] + '_' + args.annotator[1]
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -175,21 +186,25 @@ def test(epoch,net1,net2):
     net2.eval()
     correct = 0
     total = 0
+    global best_acc
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)
-            outputs2 = net2(inputs)           
+            outputs2 = net2(inputs)
             outputs = outputs1+outputs2
             _, predicted = torch.max(outputs, 1)            
                        
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()                 
     acc = 100.*correct/total
+    if acc > best_acc:
+        best_acc = acc
+        best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(round(best_acc, 3)) + str(epoch) + '_best.pth') 
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
+        print('Saving Best Model to %s \n' % best_checkpoint)
     wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
     print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
-    test_log.write('Epoch:%d   Accuracy:%.2f\n'%(epoch,acc))
-    test_log.flush()  
 
 def eval_train(model, eval_loader):  
     """
@@ -270,13 +285,10 @@ def adjust_learning_rate(args, optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-stats_log=open('./checkpoint/'+running_name+'_stats.txt','w') 
-test_log=open('./checkpoint/'+running_name+'_acc.txt','w')     
-
 warm_up = args.warm_up_epochs
 
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path,log=stats_log,noise_file=args.noise_file)
+    root_dir=args.data_path, noise_file=args.noise_file)
 
 print('****** Building net ******')
 net1 = create_model()
@@ -289,11 +301,14 @@ optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay
 
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
-# if args.noise_mode=='asym':
-#     conf_penalty = NegEntropy()
+
+best_acc = 0
+# Check the directory of saving models.
+if not os.path.exists(args.project_name):
+    os.makedirs(args.project_name)
 
 # all_loss = [[],[]] # save the history of losses from two networks
-
+# judge the length of annotator.
 for epoch in range(args.num_epochs+1):   
     # lr=args.lr
     # if epoch % 150 == 0 and epoch>0:
@@ -305,16 +320,16 @@ for epoch in range(args.num_epochs+1):
     # for param_group in optimizer2.param_groups:
     #     param_group['lr'] = lr          
     test_loader = loader.run('test')
-    eval_loader_1 = loader.run('eval_train', annotator='random_label1')
-    eval_loader_2 = loader.run('eval_train', annotator='random_label2')   
+    eval_loader_1 = loader.run('eval_train', annotator=annotators[0])
+    eval_loader_2 = loader.run('eval_train', annotator=annotators[1])   
     
     if epoch<warm_up:       
-        warmup_trainloader_1 = loader.run('warmup', annotator='random_label1')
+        warmup_trainloader_1 = loader.run('warmup', annotator=annotators[0])
         print('Warmup Net1')
         warmup(epoch,net1,optimizer1,warmup_trainloader_1)    
         
         print('\nWarmup Net2')
-        warmup_trainloader_2 = loader.run('warmup', annotator='random_label2')
+        warmup_trainloader_2 = loader.run('warmup', annotator=annotators[1])
         warmup(epoch,net2,optimizer2,warmup_trainloader_2) 
    
     else:
@@ -326,17 +341,16 @@ for epoch in range(args.num_epochs+1):
         pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2,annotator='random_label1') # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2,annotator=annotators[0]) # co-divide
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1, annotator='random_label2') # co-divide
+        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1, annotator=annotators[1]) # co-divide
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
     # Save the model as the last one model. 
-    if epoch == args.num_epochs:
-        torch.save(net1.state_dict(),'./checkpoint/'+ args.project_name + '_' + running_name+'_last_net1.pth')
-        torch.save(net2.state_dict(),'./checkpoint/'+ args.project_name + '_' + running_name+'_last_net2.pth')
-
     test(epoch,net1,net2)  
+    if epoch == args.num_epochs:
+        last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
 
 
