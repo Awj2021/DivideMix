@@ -32,7 +32,7 @@ class cifar_dataset(Dataset):
         if dataset=='cifar100' and not os.path.exists('%s/cifar-100-python'%root_dir):
             os.system('wget -O %s/cifar-100-python.tar.gz https://www.cs.toronto.edu/~kriz/cifar-100-python.tar.gz'%root_dir)
             os.system('tar -xzvf %s/cifar-100-python.tar.gz -C %s'%(root_dir, root_dir))
-    
+             
             # there is another way to download the dataset using torchvision.datasets.
             # datasets.CIFAR10(root_dir, train=True, download=True)
 
@@ -65,15 +65,18 @@ class cifar_dataset(Dataset):
                 train_clean_label = train_dic['fine_labels']
             train_data = train_data.reshape((50000, 3, 32, 32))
             train_data = train_data.transpose((0, 2, 3, 1))
-            
-            multi_rater = torch.load(os.path.join(root_dir, noise_file))
-            # multi_rater_labels = np.stack((multi_rater['random_label1'],
-            #                                   multi_rater['random_label2'],
-            #                                   multi_rater['random_label3']), axis=0)
-            # multi_rater_labels = np.transpose(multi_rater_labels)  # shape: (50000, 3)
-            noise_label = multi_rater[annotator]
-            # noise_label = multi_rater_labels[:, self.annotator]  # shape: (50000,) 
-            # ipdb.set_trace()
+
+            if dataset == 'cifar10': 
+                multi_rater = torch.load(os.path.join(root_dir, noise_file))
+                # multi_rater_labels = np.stack((multi_rater['random_label1'],
+                #                                   multi_rater['random_label2'],
+                #                                   multi_rater['random_label3']), axis=0)
+                # multi_rater_labels = np.transpose(multi_rater_labels)  # shape: (50000, 3)
+                noise_label = multi_rater[annotator]
+            elif dataset == 'cifar100': 
+                # FIXME:only for the cifar100n dataset. If we generate the multi-rater labels for cifar100, we need to change the code.
+                noise_label = torch.load(os.path.join(root_dir, noise_file))
+                noise_label = noise_label['noisy_label'] # just only one annotator.
             
             if self.mode == 'all':
                 self.train_data = train_data
