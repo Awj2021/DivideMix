@@ -68,15 +68,12 @@ class cifar_dataset(Dataset):
 
             if dataset == 'cifar10': 
                 multi_rater = torch.load(os.path.join(root_dir, noise_file))
-                # multi_rater_labels = np.stack((multi_rater['random_label1'],
-                #                                   multi_rater['random_label2'],
-                #                                   multi_rater['random_label3']), axis=0)
-                # multi_rater_labels = np.transpose(multi_rater_labels)  # shape: (50000, 3)
                 noise_label = multi_rater[annotator]
             elif dataset == 'cifar100': 
                 # FIXME:only for the cifar100n dataset. If we generate the multi-rater labels for cifar100, we need to change the code.
-                noise_label = torch.load(os.path.join(root_dir, noise_file))
-                noise_label = noise_label['noisy_label'] # just only one annotator.
+                multi_rater = torch.load(os.path.join(root_dir, noise_file))
+                # noise_label = noise_label['noisy_label'] # just only one annotator.
+                noise_label = multi_rater[annotator]
             
             if self.mode == 'all':
                 self.train_data = train_data

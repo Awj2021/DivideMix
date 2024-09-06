@@ -187,11 +187,11 @@ def test(epoch,net1,net2):
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()                 
     acc = 100.*correct/total
-    if acc > best_acc:
+    if acc > best_acc and epoch>warm_up:
         best_acc = acc
         best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(round(best_acc, 3)) + str(epoch) + '_best.pth') 
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
-        print('Saving Best Model to %s \n' % best_checkpoint)
+        print('\nSaving Best Model to %s \n' % best_checkpoint)
     wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
     print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
 
@@ -337,5 +337,6 @@ for epoch in range(args.num_epochs+1):
     if epoch == args.num_epochs:
         last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
+        print('\nSaving Last Model to %s \n' % last_checkpoint)
 
 
