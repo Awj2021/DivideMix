@@ -15,6 +15,7 @@ import dataloader_cifar as dataloader
 import wandb
 import ipdb
 import math
+import torch.nn.functional as F
 # from pycave.bayes import GaussianMixture
 
 # TODO: requirements for environment.
@@ -86,7 +87,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         # ipdb.set_trace()
         with torch.no_grad():
             # label co-guessing of unlabeled samples
-            outputs_u11 = net(inputs_u)
+            outputs_u11 = net(inputs_u) 
             outputs_u12 = net(inputs_u2)
             outputs_u21 = net2(inputs_u)
             outputs_u22 = net2(inputs_u2)            
@@ -174,26 +175,36 @@ def test(epoch,net1,net2):
     net1.eval()
     net2.eval()
     correct = 0
+    correct_after_sf = 0
     total = 0
-    global best_acc
+    global best_acc, best_acc_after_sf
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)
             outputs2 = net2(inputs)
             outputs = outputs1+outputs2
+            outputs_after_sf = (torch.softmax(outputs1, dim=1) + torch.softmax(outputs2, dim=1)) / 2
             _, predicted = torch.max(outputs, 1)            
-                       
+            _, predicted_after_sf = torch.max(outputs_after_sf, 1)           
             total += targets.size(0)
-            correct += predicted.eq(targets).cpu().sum().item()                 
+            correct += predicted.eq(targets).cpu().sum().item() 
+            correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
     acc = 100.*correct/total
+    acc_after_sf = 100.*correct_after_sf/total
     if acc > best_acc and epoch>warm_up:
         best_acc = acc
         best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(round(best_acc, 3)) + str(epoch) + '_best.pth') 
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
-    wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
-    print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
+
+    if acc_after_sf > best_acc_after_sf and epoch>warm_up:
+        best_acc_after_sf = acc_after_sf
+        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name+'_' + str(epoch) + '_best.pth') 
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
+        print('\nSaving Best Model to %s \n' % best_checkpoint)
+    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf}) if args.wandb else None
+    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))  
 
 def eval_train(model,all_loss):    
     model.eval()
@@ -292,6 +303,7 @@ CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
 
 best_acc = 0
+best_acc_after_sf = 0
 # Check the directory of saving models.
 if not os.path.exists(args.project_name):
     os.makedirs(args.project_name)
