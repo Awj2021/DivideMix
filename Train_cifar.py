@@ -27,7 +27,7 @@ parser.add_argument('--batch_size', default=128, type=int, help='train batchsize
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
 parser.add_argument('--noise_mode',  default='sym')
 parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
-parser.add_argument('--lambda_u', default=0, type=float, help='weight for unsupervised loss')
+parser.add_argument('--lambda_u', default=150, type=float, help='weight for unsupervised loss') # set lambda_u = 150 for all the experiments.
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
 parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
@@ -67,7 +67,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     net.train()
     net2.eval() #fix one network and train the other
       
-    unlabeled_train_iter = iter(unlabeled_trainloader)    
+    unlabeled_train_iter = iter(unlabeled_trainloader)   
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
     for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):  # labels_x is the target label.    
         try:
@@ -194,16 +194,16 @@ def test(epoch,net1,net2):
     acc_after_sf = 100.*correct_after_sf/total
     if acc > best_acc and epoch>warm_up:
         best_acc = acc
-        best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(round(best_acc, 3)) + str(epoch) + '_best.pth') 
+        best_checkpoint = os.path.join(args.project_name, running_name+'_' + '_best.pth') 
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
     if acc_after_sf > best_acc_after_sf and epoch>warm_up:
         best_acc_after_sf = acc_after_sf
-        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name+'_' + str(epoch) + '_best.pth') 
+        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth') 
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
-    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf}) if args.wandb else None
+    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf, 'Best_Acc_w_sf': best_acc_after_sf}) if args.wandb else None
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))  
 
 def eval_train(model,all_loss):    

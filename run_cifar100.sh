@@ -10,5 +10,7 @@ python=/mnt/fast/nobackup/users/wa00433/miniconda3/envs/divide1/bin/python
 # $python Train_cifar.py --data_path ./cifar-100-python --project_name cifar100n_dividemix_baseline --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine --lambda_u 150 --noise_file CIFAR-100_human.pt --num_class 100 --wandb
 
 # Cifar100 IDN Setting.
-annotator=$1
-$python Train_cifar.py --data_path ./cifar-100-python --project_name cifar100_IDN50_dividemix_baseline --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine --lambda_u 150 --noise_file Simulated_Human.pt --num_class 100 --annotator $annotator --wandb
+# annotator=$1
+lambda_u=$1
+annotator=$2
+$python Train_cifar.py --data_path ./cifar-100-python --project_name cifar100_IDN50_dividemix_MV --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine --noise_file Simulated_Human.pt --num_class 100 --lambda_u $lambda_u --annotator $annotator --wandb 

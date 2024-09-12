@@ -1,7 +1,7 @@
 JobBatchName = "cifar10_one_annotator$(cluster)"
 
 executable = /bin/bash
-arguments = /mnt/fast/nobackup/scratch4weeks/wa00433/projects/DivideMix/run_cifar100.sh $(annotator) $(process)
+arguments = /mnt/fast/nobackup/scratch4weeks/wa00433/projects/DivideMix/run_cifar100.sh $(lambda_u) $(annotator) $(process)
 
 universe         = docker
 docker_image     = nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
@@ -32,15 +32,25 @@ requirements = (CUDAGlobalMemoryMb > 4500) && \
 
 request_GPUs     = 1
 request_CPUs     = 4
-request_memory   = 32G
+request_memory   = 24G
 
 #This job will complete in less than 1 hour
-+JobRunTime = 72
++JobRunTime = 24
 +GPUMem = 8000
 
 +CanCheckpoint = true
 
-queue 1 annotator in random_label1, random_label2, random_label3
+#queue 1 annotator in aggre_6_label 
 #queue 1 T_max in 200, 300, 600
 #queue 1 batch_size in 128
-#queue
+#queue 1 annotator in aggre_label 
+#queue 1 lambda_u in 25, 50
+
+lambda_u = 0
+queue 1 annotator in aggre_4_label, aggre_5_label, aggre_6_label 
+
+lambda_u = 25
+queue 1 annotator in aggre_4_label, aggre_5_label, aggre_6_label 
+
+annotator = aggre_label
+queue 1 lambda_u in 50, 80, 100
