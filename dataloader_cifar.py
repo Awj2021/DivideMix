@@ -91,7 +91,10 @@ class cifar_dataset(Dataset):
                     auc_meter.reset()
                     auc_meter.add(probability,clean)        
                     auc,_,_ = auc_meter.value()
-                    wandb.log({'Num_Labeled_Samples': pred.sum(), 'AUC': auc})
+                    try:
+                        wandb.log({'Num_Labeled_Samples': pred.sum(), 'AUC': auc})
+                    except:
+                        pass
                     
                 elif self.mode == "unlabeled":
                     pred_idx = (1-pred).nonzero()[0]  # why it looks like this?   

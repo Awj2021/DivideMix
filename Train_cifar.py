@@ -15,6 +15,8 @@ import dataloader_cifar as dataloader
 import wandb
 import ipdb
 import math
+import torch.nn.functional as F
+
 # from pycave.bayes import GaussianMixture
 
 # TODO: requirements for environment.
@@ -60,22 +62,28 @@ if not os.path.exists(args.data_path):
 
 # if len(args.annotator) != 2:
 #     raise ValueError('The number of annotator should be 2.')
-if args.annotator == 'random_label1_2':
-    annotators = ['random_label1', 'random_label2']
-elif args.annotator == 'random_label1_3':
-    annotators = ['random_label1', 'random_label3']
-elif args.annotator == 'random_label2_3':
-    annotators = ['random_label2', 'random_label3']
-else:
-    raise ValueError('The annotator should be specified.')
+# if args.annotator == 'random_label1_2':
+#     annotators = ['random_label1', 'random_label2']
+# elif args.annotator == 'random_label1_3':
+#     annotators = ['random_label1', 'random_label3']
+# elif args.annotator == 'random_label2_3':
+#     annotators = ['random_label2', 'random_label3']
+# else:
+#     raise ValueError('The annotator should be specified.')
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + args.annotator[0] + '_' + args.annotator[1]
+if args.annotator == 'three_annotators':
+    annotators = ['random_label1', 'random_label2', 'random_label3']
+else:
+    raise ValueError('The annotator should be specified 3.')
+
+running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + args.annotator + '_' + 'randomly_choosing'
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
-def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
+def train(epoch,net,net2,net3,optimizer,labeled_trainloader,unlabeled_trainloader):
     net.train()
     net2.eval() #fix one network and train the other
+    net3.eval()
       
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
@@ -100,9 +108,11 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
             outputs_u11 = net(inputs_u)
             outputs_u12 = net(inputs_u2)
             outputs_u21 = net2(inputs_u)
-            outputs_u22 = net2(inputs_u2)            
+            outputs_u22 = net2(inputs_u2)
+            outputs_u31 = net3(inputs_u)
+            outputs_u32 = net3(inputs_u2)            
             
-            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1)) / 4       
+            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1)) + torch.softmax(outputs_u31, dim=1) + torch.softmax(outputs_u32, dim=1) / 6       
             ptu = pu**(1/args.T) # temparature sharpening
             
             targets_u = ptu / ptu.sum(dim=1, keepdim=True) # normalize
@@ -181,30 +191,42 @@ def warmup(epoch,net,optimizer,dataloader):
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
         sys.stdout.flush()
 
-def test(epoch,net1,net2):
+def test(epoch,net1,net2, net3):
     net1.eval()
     net2.eval()
+    net3.eval()
     correct = 0
+    correct_after_sf = 0
     total = 0
-    global best_acc
+    global best_acc, best_acc_after_sf
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)
             outputs2 = net2(inputs)
-            outputs = outputs1+outputs2
+            outputs3 = net3(inputs)
+            outputs = outputs1+outputs2+outputs3
+            outputs_after_sf = (torch.softmax(outputs1, dim=1) + torch.softmax(outputs2, dim=1) + torch.softmax(outputs3, dim=1))/3
             _, predicted = torch.max(outputs, 1)            
-                       
+            _, predicted_after_sf = torch.max(outputs_after_sf, 1)           
             total += targets.size(0)
-            correct += predicted.eq(targets).cpu().sum().item()                 
+            correct += predicted.eq(targets).cpu().sum().item() 
+            correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
     acc = 100.*correct/total
+    acc_after_sf = 100.*correct_after_sf/total
     if acc > best_acc and epoch>warm_up:
         best_acc = acc
         best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_best.pth') 
-        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict(), 'net3': net3.state_dict()}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
-    wandb.log({'epoch': epoch, 'Accuracy': acc}) if args.wandb else None
-    print("\n| Test Epoch #%d\t Accuracy: %.2f%%\n" %(epoch,acc))  
+
+    if acc_after_sf > best_acc_after_sf and epoch>warm_up:
+        best_acc_after_sf = acc_after_sf
+        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name+'_' + str(epoch) + '_best.pth') 
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict(), 'net3':net3.state_dict()}, best_checkpoint)
+        print('\nSaving Best Model to %s \n' % best_checkpoint)
+    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf}) if args.wandb else None
+    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))  
 
 def eval_train(model, eval_loader):  
     """
@@ -220,13 +242,6 @@ def eval_train(model, eval_loader):
             for b in range(inputs.size(0)):
                 losses[index[b]]=loss[b]  # save the loss for each sample.        
     losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
-    # all_loss.append(losses)
-    # ema
-    # if args.r==0.9: # average loss over last 5 epochs to improve convergence stability
-    #     history = torch.stack(all_loss)
-    #     input_loss = history[-5:].mean(0)
-    #     input_loss = input_loss.reshape(-1,1)
-    # else: 
     input_loss = losses.reshape(-1,1)
     gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
     # gmm = GaussianMixture(num_components=2, covariance_type='full')
@@ -293,16 +308,18 @@ loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noi
 print('****** Building net ******')
 net1 = create_model()
 net2 = create_model()
+net3 = create_model()
 cudnn.benchmark = True
 
 criterion = SemiLoss()
 optimizer1 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-
+optimizer3 = optim.SGD(net3.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
 
 best_acc = 0
+best_acc_after_sf = 0
 # Check the directory of saving models.
 if not os.path.exists(args.project_name):
     os.makedirs(args.project_name)
@@ -310,18 +327,15 @@ if not os.path.exists(args.project_name):
 # all_loss = [[],[]] # save the history of losses from two networks
 # judge the length of annotator.
 for epoch in range(args.num_epochs+1):   
-    # lr=args.lr
-    # if epoch % 150 == 0 and epoch>0:
-    #     lr /= 10
     adjust_learning_rate(args, optimizer1, epoch)
-    adjust_learning_rate(args, optimizer2, epoch)      
-    # for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
-    #     param_group['lr'] = lr       
-    # for param_group in optimizer2.param_groups:
-    #     param_group['lr'] = lr          
+    adjust_learning_rate(args, optimizer2, epoch)
+    adjust_learning_rate(args, optimizer3, epoch)    
+    
     test_loader = loader.run('test')
     eval_loader_1 = loader.run('eval_train', annotator=annotators[0])
-    eval_loader_2 = loader.run('eval_train', annotator=annotators[1])   
+    eval_loader_2 = loader.run('eval_train', annotator=annotators[1])
+    eval_loader_3 = loader.run('eval_train', annotator=annotators[2])
+    eval_loaders = [eval_loader_1, eval_loader_2, eval_loader_3]
     
     if epoch<warm_up:       
         warmup_trainloader_1 = loader.run('warmup', annotator=annotators[0])
@@ -331,27 +345,75 @@ for epoch in range(args.num_epochs+1):
         print('\nWarmup Net2')
         warmup_trainloader_2 = loader.run('warmup', annotator=annotators[1])
         warmup(epoch,net2,optimizer2,warmup_trainloader_2) 
+
+        print('\nWarmup Net3')
+        warmup_trainloader_3 = loader.run('warmup', annotator=annotators[2])
+        warmup(epoch,net3,optimizer3,warmup_trainloader_3)
    
     else:
-        # net1 is used for testing the net2 and vice versa.         
-        prob1 = eval_train(net1, eval_loader=eval_loader_2)   # The probability is calculated when evaluating. 
-        prob2 = eval_train(net2, eval_loader=eval_loader_1)   # Use the all train_data and the noisy labels.        
+        # net1 is used for testing the net2 and vice versa.
+        # Randomly choose 1 or 2 from 1 and 2
+        # random.seed(args.seed)
+        # choice = random.choice([0, 1, 2])
+        # each model should be trained once. But the data loader maybe different at each time.
+        for i in range(3):
+            # choice = random.choice([0, 1, 2])
+            if i == 0:
+                model_choise = random.choice([2, 3])
+                if model_choise == 2:
+                    prob = eval_train(net2, eval_loader=eval_loader_1)
+                else:
+                    prob = eval_train(net3, eval_loader=eval_loader_1)
+                pred = (prob > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
+                print('\n Train Net%d' % (i+1))
+                labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[0]) # co-divide
+                train(epoch, net1, net2, net3, optimizer1, labeled_trainloader, unlabeled_trainloader)
+            elif i == 1:
+                model_choise = random.choice([1, 3])
+                if model_choise == 1:
+                    prob = eval_train(net1, eval_loader=eval_loader_2)
+                else:
+                    prob = eval_train(net3, eval_loader=eval_loader_2)
+                pred = (prob > args.p_threshold)
+                print('\n Train Net%d' % (i+1))
+                labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[1]) # co-divide
+                train(epoch, net2, net1, net3, optimizer2, labeled_trainloader, unlabeled_trainloader)
+            else:
+                model_choise = random.choice([1, 2])
+                if model_choise == 1:
+                    prob = eval_train(net1, eval_loader=eval_loader_3)
+                else:
+                    prob = eval_train(net2, eval_loader=eval_loader_3)
+                pred = (prob > args.p_threshold)
+                print('\n Train Net%d' % (i+1))
+                labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[2])
+                train(epoch, net3, net1, net2, optimizer3, labeled_trainloader, unlabeled_trainloader)
+
+
+        # prob1 = eval_train(net1, eval_loader=eval_loader_2)   # The probability is calculated when evaluating. 
+        # prob2 = eval_train(net2, eval_loader=eval_loader_3)   # Use the all train_data and the noisy labels.  
+        # prob3 = eval_train(net3, eval_loader=eval_loader_1)   # Use the all train_data and the noisy labels.      
                
-        pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
-        pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
+        # pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
+        # pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
+        # pred3 = (prob3 > args.p_threshold)      # The list of pred only contains the True or False.
         
-        print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2,annotator=annotators[0]) # co-divide
-        train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
+        # print('Train Net1')
+        # labeled_trainloader, unlabeled_trainloader = loader.run('train',pred3,prob3,annotator=annotators[0]) # co-divide
+        # train(epoch,net1,net2,net3,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
-        print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1, annotator=annotators[1]) # co-divide
-        train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
+        # print('\nTrain Net2')
+        # labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1, annotator=annotators[1]) # co-divide
+        # train(epoch,net2,net1,net3,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2   
+
+        # print('\nTrain Net3')
+        # labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2, annotator=annotators[2])
+        # train(epoch,net3,net1,net2,optimizer3,labeled_trainloader, unlabeled_trainloader) # train net3      
     # Save the model as the last one model. 
-    test(epoch,net1,net2)  
+    test(epoch,net1,net2,net3)  
     if epoch == args.num_epochs:
         last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
-        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict(), 'net3':net3.state_dict()}, last_checkpoint)
         print('\nSaving Last Model to %s \n' % last_checkpoint)
 
 
