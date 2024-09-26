@@ -40,10 +40,4 @@ request_memory   = 32G
 
 +CanCheckpoint = true
 
-#queue 1 lambda_u in 1,2,5
-#queue 1 T_max in 200, 300, 600
-#queue 1 batch_size in 128
-#queue 1 epochs in 300, 600
-#queue 1 annotator in random_label1_2, random_label1_3, random_label2_3
-#queue 1 annotator in three_annotators
-queue 1 lambda_u in 25, 50, 150
+queue 1 lambda_u in 150
