@@ -46,11 +46,20 @@ request_memory   = 24G
 #queue 1 annotator in aggre_label 
 #queue 1 lambda_u in 25, 50
 
+#lambda_u = 0
+#queue 1 annotator in aggre_4_label, aggre_5_label, aggre_6_label 
+
+#lambda_u = 25
+#queue 1 annotator in aggre_4_label, aggre_5_label, aggre_6_label 
+
+#annotator = aggre_label
+#queue 1 lambda_u in 50, 80, 100
+
+#lambda_u = 150
+#queue 1 annotator in random_label1, random_label2, random_label3, random_label4, random_label5, random_label6
+
 lambda_u = 0
-queue 1 annotator in aggre_4_label, aggre_5_label, aggre_6_label 
+queue 1 annotator in cleanlab_3, cleanlab_4, cleanlab_5, cleanlab_6
 
 lambda_u = 25
-queue 1 annotator in aggre_4_label, aggre_5_label, aggre_6_label 
-
-annotator = aggre_label
-queue 1 lambda_u in 50, 80, 100
+queue 1 annotator in cleanlab_3, cleanlab_4, cleanlab_5, cleanlab_6 
