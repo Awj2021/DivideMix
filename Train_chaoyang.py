@@ -17,6 +17,8 @@ import ipdb
 import wandb
 import math
 from PreResNet import ResNet18, ResNet34, ResNet50 
+from tqdm import tqdm
+
 
 # TODO:
 # 1. copy the dataset into the data folder.
@@ -24,11 +26,12 @@ parser = argparse.ArgumentParser(description='PyTorch chaoyang Training')
 parser.add_argument('--batch_size', default=32, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.002, type=float, help='initial learning rate')
 parser.add_argument('--alpha', default=0.5, type=float, help='parameter for Beta')
+parser.add_argument('--lr_decay_rate', default=0.1, type=float, help='decay rate for learning rate')
 parser.add_argument('--lambda_u', default=0, type=float, help='weight for unsupervised loss')
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
-parser.add_argument('--num_epochs', default=80, type=int)
-parser.add_argument('--warmup_epochs', default=10, type=int)
+parser.add_argument('--num_epochs', default=100, type=int)
+parser.add_argument('--warm_up_epochs', default=10, type=int)
 parser.add_argument('--data_path', default='./chaoyang', type=str, help='path to dataset')
 parser.add_argument('--seed', default=123)
 parser.add_argument('--gpuid', default=0, type=int)
@@ -38,6 +41,7 @@ parser.add_argument('--dataset', default='choayang', type=str, help='name of the
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
 parser.add_argument('--annotator', default='label_A', type=str, help='name of the annotator.')
 parser.add_argument('--model', default='resnet34', type=str, help='name of the model.')
+parser.add_argument('--cosine', action='store_true', help='use cosine annealing.')
 args = parser.parse_args()
 
 
@@ -131,7 +135,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     
 def warmup(net,optimizer,dataloader):
     net.train()
-    for batch_idx, (inputs, labels, path) in enumerate(dataloader):      
+    for batch_idx, (inputs, labels, path, index) in tqdm(enumerate(dataloader)):      
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
         outputs = net(inputs)              
@@ -166,25 +170,27 @@ def test(net1,net2,test_loader):
     acc_w_sf = 100.*correct_w_sf/total
     print("\n| Test Acc: %.2f%%\n" %(acc))  
     print("\n| Test Acc with Softmax: %.2f%%\n" %(acc_w_sf))
-    wandb.log({"test_acc_wo_sf": acc, "test_acc_w_sf": acc_w_sf}) if args.wandb else None
+    wandb.log({"test_acc_wo_sf": acc, "test_acc_w_sf": acc_w_sf, "epch": epoch}) if args.wandb else None
 
     
 def eval_train(epoch,model):
+    print('\n==== evaluate next epoch training data loss ====')
     model.eval()
     # num_samples = args.num_batches*args.batch_size  # TODO: the num_samples should be the length of the training dataset.
-    num_samples = len(loader.train_imgs)
+    num_samples = len(eval_loader.dataset)
     losses = torch.zeros(num_samples)
     paths = []
 
     with torch.no_grad():
         for batch_idx, (inputs, targets, path, index) in enumerate(eval_loader):
-            inputs, targets = inputs.cuda(), targets.cuda() 
+            inputs, targets = inputs.cuda(), targets.cuda() # inputs: (batch_size, 3, 224, 224), targets: (batch_size,)
+            # ipdb.set_trace() 
             outputs = model(inputs) 
             loss = CE(outputs, targets)  
             for b in range(inputs.size(0)):
-                losses[index[b]]=loss[b] 
+                losses[index[b]]=loss[b]  
                 paths.append(path[b])
-            
+    # ipdb.set_trace()
     losses = (losses-losses.min())/(losses.max()-losses.min())    
     losses = losses.reshape(-1,1)
     gmm = GaussianMixture(n_components=2,max_iter=10,reg_covar=5e-4,tol=1e-2)
@@ -203,31 +209,35 @@ def adjust_learning_rate(args, optimizer, epoch):
     if args.cosine:
         eta_min = lr * (args.lr_decay_rate ** 3)
         lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / args.num_epochs)) / 2
-    # else:
-    #     steps = np.sum(epoch > np.asarray(args.lr_decay_epochs))
-    #     if steps > 0:
-    #         lr = lr * (args.lr_decay_rate ** steps)
     else:
-        if epoch%150==0 and epoch>0:  # put the original learning rate here. Just for 300 epochs.
+        if epoch%50==0 and epoch>0:  # put the original learning rate here. Just for 300 epochs.
             lr *= args.lr_decay_rate
 
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
 def create_model():
-    if args.model == 'resnet18': # Please make sure that the model has the pre activate layer.
-        model = ResNet18(num_classes=args.num_class)
+    # if args.model == 'resnet18': # Please make sure that the model has the pre activate layer.
+    #     model = ResNet18(num_classes=args.num_class)
+    if args.model == 'resnet18':
+        model = models.resnet18(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(model.fc.in_features,args.num_class)
+
     elif args.model == 'resnet34':
-        model = ResNet34(num_classes=args.num_class)
+        model = models.resnet34(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(model.fc.in_features,args.num_class)
+
     elif args.model == 'resnet50':
-        model = ResNet50(num_classes=args.num_class)
+        model = models.resnet50(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(model.fc.in_features, args.num_class)
     else:
         raise ValueError('Model not supported.')
+    
     model = model.cuda()
     return model
 
 
-loader = dataloader.chaoyang_dataset(root=args.data_path,batch_size=args.batch_size,num_workers=5,num_batches=args.num_batches)
+loader = dataloader.chaoyang_dataloader(root=args.data_path, batch_size=args.batch_size, num_workers=5, annotator=args.annotator)
 
 print('| Building net')
 net1 = create_model()
@@ -246,12 +256,12 @@ for epoch in range(args.num_epochs+1):
     adjust_learning_rate(args, optimizer1, epoch)
     adjust_learning_rate(args, optimizer2, epoch)
         
-    if epoch<args.warmup_epochs:     # warm up  
+    if epoch<1:     # warm up  
         train_loader = loader.run('warmup')
-        print('Warmup Net1')
+        print('| Warmup Net1\n')
         warmup(net1,optimizer1,train_loader)     
         train_loader = loader.run('warmup')
-        print('\nWarmup Net2')
+        print('| Warmup Net2')
         warmup(net2,optimizer2,train_loader)                  
     else:       
         pred1 = (prob1 > args.p_threshold)  # divide dataset  
@@ -267,10 +277,15 @@ for epoch in range(args.num_epochs+1):
     
     eval_loader = loader.run('eval_train')  # evaluate training data loss for next epoch  
     prob1,paths1 = eval_train(epoch,net1) 
-    
     print('\n==== net 2 evaluate next epoch training data loss ====') 
     eval_loader = loader.run('eval_train')  
     prob2,paths2 = eval_train(epoch,net2) 
 
-test_loader = loader.run('test')
-test(net1,net2,test_loader)      
+    print('\n==== Testing ====')
+    test_loader = loader.run('test')
+    test(net1,net2,test_loader)
+
+    if epoch == args.num_epochs:
+        last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
+        print('\nSaving Last Model to %s \n' % last_checkpoint)

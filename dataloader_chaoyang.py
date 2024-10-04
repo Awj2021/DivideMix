@@ -16,20 +16,22 @@ class chaoyang_dataset(Dataset):
         self.train_labels = {}
         self.test_labels = {}
 
-        train_json_file = os.path.join(self.root, 'json', 'train_ori.json')
+        train_json_file = os.path.join(self.root, 'json', 'train_mv.json')
         test_json_file = os.path.join(self.root, 'json', 'test_ori.json')
 
-        with open(train_json_file, 'r') as f:
-            train_json = json.load(f)
-            for entry in train_json:
-                img_path = os.path.join(self.root, entry['name'])
-                self.train_labels[img_path] = entry[annotator]
-        
-        with open(test_json_file, 'r') as f:
-            test_json = json.load(f)
-            for entry in test_json:
-                img_path = os.path.join(self.root, entry['name'])
-                self.test_labels[img_path] = entry['label']
+        if mode == 'test':
+            with open(test_json_file, 'r') as f:
+                test_json = json.load(f)
+                for entry in test_json:
+                    img_path = os.path.join(self.root, entry['name'])
+                    self.test_labels[img_path] = entry['label']
+        else:
+            with open(train_json_file, 'r') as f:
+                train_json = json.load(f)
+                # ipdb.set_trace()
+                for entry in train_json:
+                    img_path = os.path.join(self.root, entry['name'])
+                    self.train_labels[img_path] = entry[annotator]
 
         if mode == 'all':
             self.train_imgs=[]
@@ -98,7 +100,7 @@ class chaoyang_dataset(Dataset):
         else:
             return len(self.train_imgs)            
         
-class clothing_dataloader():  
+class chaoyang_dataloader():  
     def __init__(self, root, batch_size, num_workers, annotator):    
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -117,7 +119,8 @@ class clothing_dataloader():
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ])        
+            ])
+                
     def run(self,mode,pred=[],prob=[],paths=[]):        
         if mode=='warmup':
             warmup_dataset = chaoyang_dataset(self.root,transform=self.transform_train, mode='all', annotator=self.annotator)
