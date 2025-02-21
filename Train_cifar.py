@@ -50,6 +50,8 @@ parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate 
 parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
 
+parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
+
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -140,9 +142,11 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         logits = net(mixed_input)
         logits_x = logits[:batch_size*2] # refer to the all_inputs. [inputs_x, inputs_x2, xxx]
         logits_u = logits[batch_size*2:] # refer to the all_inputs. [xxx, xxx, inputs_u, inputs_u2]
-           
-        Lx, Lu, lamb = criterion(logits_x, mixed_target[:batch_size*2], logits_u, mixed_target[batch_size*2:], epoch+batch_idx/num_iter, warm_up)
         
+        # For debugging, I found that the Lu is not 0. Just it is very tiny, like 0.0001.
+        Lx, Lu, lamb = criterion(logits_x, mixed_target[:batch_size*2], logits_u, mixed_target[batch_size*2:], epoch+batch_idx/num_iter, warm_up)
+        # if epoch == 6:
+        #     breakpoint() 
         # regularization
         prior = torch.ones(args.num_class)/args.num_class
         prior = prior.cuda()        
@@ -177,9 +181,9 @@ def warmup(epoch,net,optimizer,dataloader):
         L.backward()  
         optimizer.step() 
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
+        wandb.log({'  epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
         sys.stdout.write('\r')
-        sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
+        sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f \n'
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
         sys.stdout.flush()
 
@@ -216,6 +220,8 @@ def test(epoch, nets):
         print('\nSaving Best Model to %s \n' % best_checkpoint)
     wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf}) if args.wandb else None
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))  
+    sys.stdout.write('%s: | Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n' %(args.dataset, epoch, acc, acc_after_sf))
+    sys.stdout.flush()
 
 def eval_train(model, eval_loader):  
     """
@@ -307,7 +313,28 @@ best_acc_after_sf = 0
 if not os.path.exists(args.project_name):
     os.makedirs(args.project_name)
 
-for epoch in range(args.num_epochs+1):    
+
+latest_checkpoint = os.path.join(args.project_name, running_name + '_' + 'latest.pth')
+
+if args.resume:
+    if os.path.isfile(latest_checkpoint):
+        print("=> loading checkpoint '{}'".format(latest_checkpoint))
+        checkpoint = torch.load(latest_checkpoint)
+        start_epoch = checkpoint['epoch'] + 1
+        for i, net in enumerate(nets):
+            net.load_state_dict(checkpoint['nets'][f'net{i+1}'])
+        for i, optimizer in enumerate(optimizers):
+            optimizer.load_state_dict(checkpoint['optimizers'][f'optimizer{i+1}'])
+        best_acc = checkpoint['best_acc']
+        best_acc_after_sf = checkpoint['best_acc_after_sf']
+        print("=> loaded checkpoint '{}' (epoch {})".format(latest_checkpoint, checkpoint['epoch']))
+    else:
+        print("=> no checkpoint found at '{}'".format(latest_checkpoint))
+        start_epoch = 0
+else:
+    start_epoch = 0
+
+for epoch in range(start_epoch, args.num_epochs+1):    
     for optimizer in optimizers:
         adjust_learning_rate(args, optimizer, epoch) 
     
@@ -316,7 +343,7 @@ for epoch in range(args.num_epochs+1):
     if epoch<warm_up:
         warmup_trainloaders = [loader.run('warmup', annotator=annotators[i]) for i in range(len(annotators))]
         for i, (net, optimizer, warmup_trainloader) in enumerate(zip(nets, optimizers, warmup_trainloaders)):
-            print(f'\n Warmup Net{i+1}')
+            print(f'Warmup Net{i+1}: ')
             warmup(epoch, net, optimizer, warmup_trainloader)       
    
     else:
@@ -330,11 +357,17 @@ for epoch in range(args.num_epochs+1):
             print('\n Train Net%d' % (i+1))
             labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[i]) # co-divide
             train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader)
-    # Save the model as the last one model. 
-    test(epoch, nets)  
-    if epoch == args.num_epochs:
-        last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
-        torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, last_checkpoint)
-        print('\nSaving Last Model to %s \n' % last_checkpoint)
+            # Save the model as the latest one. 
+            if epoch % 10 == 0:
+                torch.save({
+                            'epoch': epoch,
+                            'nets': {f'net{i+1}': net.state_dict() for i, net in enumerate(nets)},
+                            'optimizers': {f'optimizer{i+1}': optimizer.state_dict() for i, optimizer in enumerate(optimizers)},
+                            'best_acc': best_acc,
+                            'best_acc_after_sf': best_acc_after_sf
+                        }, latest_checkpoint)
+                
+                print('\nSaving Checkpoint to %s \n' % latest_checkpoint)
 
-
+    test(epoch, nets)
+        
