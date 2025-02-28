@@ -50,7 +50,7 @@ parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate 
 parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
 
-parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
+parser.add_argument('--resume', action='store_true', hecriterionlp='resume from checkpoint')
 
 args = parser.parse_args()
 
@@ -168,7 +168,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
 def warmup(epoch,net,optimizer,dataloader):
     net.train()
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
-    for batch_idx, (inputs, labels, path) in enumerate(dataloader):      
+    for batch_idx, (inputs, labels, index) in enumerate(dataloader):      
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
         outputs = net(inputs)               
@@ -181,7 +181,7 @@ def warmup(epoch,net,optimizer,dataloader):
         L.backward()  
         optimizer.step() 
 
-        wandb.log({'  epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
+        wandb.log({'  epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
         sys.stdout.write('\r')
         sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f \n'
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
@@ -209,19 +209,21 @@ def test(epoch, nets):
 
     if acc > best_acc and epoch>warm_up:
         best_acc = acc
-        best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_best.pth') 
+        best_checkpoint = os.path.join(args.project_name, running_name + '_best.pth') 
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
     if acc_after_sf > best_acc_after_sf and epoch>warm_up:
         best_acc_after_sf = acc_after_sf
-        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name+'_' + str(epoch) + '_best.pth') 
+        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth') 
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
     wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf}) if args.wandb else None
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))  
     sys.stdout.write('%s: | Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n' %(args.dataset, epoch, acc, acc_after_sf))
     sys.stdout.flush()
+
+    return acc, acc_after_sf
 
 def eval_train(model, eval_loader):  
     """
@@ -334,6 +336,9 @@ if args.resume:
 else:
     start_epoch = 0
 
+last_5_acc = []
+last_5_acc_after_sf = []
+
 for epoch in range(start_epoch, args.num_epochs+1):    
     for optimizer in optimizers:
         adjust_learning_rate(args, optimizer, epoch) 
@@ -369,5 +374,19 @@ for epoch in range(start_epoch, args.num_epochs+1):
                 
                 print('\nSaving Checkpoint to %s \n' % latest_checkpoint)
 
-    test(epoch, nets)
+    acc, acc_after_sf = test(epoch, nets)
+    if epoch > args.num_epochs - 6:
+        last_5_acc.append(acc)
+        last_5_acc_after_sf.append(acc_after_sf)
+
+        if len(last_5_acc) > 5:
+            last_5_acc.pop(0)
+            last_5_acc_after_sf.pop(0)
+    
+        avg_acc_last_5 = sum(last_5_acc) / len(last_5_acc)
+        avg_acc_after_sf_last_5 = sum(last_5_acc_after_sf) / len(last_5_acc_after_sf)
+
+        wandb.log({'avg_acc_last_5': avg_acc_last_5, 'avg_acc_after_sf_last_5': avg_acc_after_sf_last_5}) if args.wandb else None
+        sys.stdout.write('%s: | Average Accuracy in last 5 epochs: %.2f%%, Average Accuracy after softmax in last 5 epochs: %.2f%%,\n' %(args.dataset, avg_acc_last_5, avg_acc_after_sf_last_5))
+
         
