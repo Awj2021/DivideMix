@@ -67,7 +67,7 @@ class cifar_dataset(Dataset):
             train_data = train_data.transpose((0, 2, 3, 1))
             
             multi_rater = torch.load(os.path.join(root_dir, noise_file))
-
+            # ipdb.set_trace()
             if dataset == 'cifar10': 
                 multi_rater = torch.load(os.path.join(root_dir, noise_file))
                 noise_label = multi_rater[annotator]

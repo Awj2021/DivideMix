@@ -16,12 +16,8 @@ import wandb
 import ipdb
 import math
 import torch.nn.functional as F
+from tqdm import tqdm 
 
-# from pycave.bayes import GaussianMixture
-
-# TODO: requirements for environment.
-# TODO: setting the GMM to GPU.
-# TODO: image size of dataset.
  
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
@@ -62,18 +58,25 @@ torch.cuda.manual_seed_all(args.seed)
 if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
-if args.annotator == 'three_annotators':
+if args.annotator == 'two_annotators':
+    annotators = ['random_label1', 'random_label2']
+    mv_annotator = 'aggre_2_label'
+elif args.annotator == 'three_annotators':
     annotators = ['random_label1', 'random_label2', 'random_label3']
+    mv_annotator = 'aggre_3_label'
 elif args.annotator == 'four_annotators':
     annotators = ['random_label1', 'random_label2', 'random_label3', 'random_label4']
+    mv_annotator = 'aggre_4_label'
 elif args.annotator == 'five_annotators':
     annotators = ['random_label1', 'random_label2', 'random_label3', 'random_label4', 'random_label5']
+    mv_annotator = 'aggre_5_label'
 elif args.annotator == 'six_annotators':
     annotators = ['random_label1', 'random_label2', 'random_label3', 'random_label4', 'random_label5', 'random_label6']
+    mv_annotator = 'aggre_6_label'
 else:
     raise ValueError('The annotator should be specified {}.'.format(args.annotator))
 
-running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.lambda_u) + '_' + str(len(annotators))+ '_randomly_choosing'
+running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.lambda_u) + '_' + str(len(annotators))+ 'new_algorithm_student_teacher'
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -92,7 +95,6 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         batch_size = inputs_x.size(0)
         
         # Transform label to one-hot
-        # FIXME: check the dimension of the labels_x.
         labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)        
         w_x = w_x.view(-1,1).type(torch.FloatTensor) 
 
@@ -150,7 +152,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         # regularization
         prior = torch.ones(args.num_class)/args.num_class
         prior = prior.cuda()        
-        pred_mean = torch.softmax(logits, dim=1).mean(0)
+        pred_mean = torch.softmax(logits, dim=1).mean(0) # shape: (num_class,)
         penalty = torch.sum(prior*torch.log(prior/pred_mean))
 
         loss = Lx + lamb * Lu  + penalty
@@ -167,25 +169,37 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
 
 def warmup(epoch,net,optimizer,dataloader):
     net.train()
+    logits = []
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
-    for batch_idx, (inputs, labels, path) in enumerate(dataloader):      
+    for batch_idx, (inputs, labels, index) in tqdm(enumerate(dataloader)):      
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
-        outputs = net(inputs)               
-        loss = CEloss(outputs, labels)      
-        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-        #     penalty = conf_penalty(outputs)
-        #     L = loss + penalty      
-        # elif args.noise_mode=='sym':   
+        outputs = net(inputs)
+        # logits_mean = torch.softmax(outputs, dim=1).mean(0)
+        logits.append(torch.softmax(outputs, dim=1))          
+        loss = CEloss(outputs, labels)        
         L = loss
         L.backward()  
         optimizer.step() 
 
-        wandb.log({'  epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
+        wandb.log({'  epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
         sys.stdout.write('\r')
         sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f \n'
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
         sys.stdout.flush()
+    # dimension of the logits: (batch_size * num_iteration, num_class)
+    # ipdb.set_trace()
+    return torch.cat(logits, dim=0) # if I mean the logits along the dim=1, the results will be all 0.01.
+
+def calculating_logits(net, dataloader):
+    net.eval()
+    logits = []
+    with torch.no_grad():
+        for batch_idx, (inputs, labels, _) in tqdm(enumerate(dataloader)):
+            inputs, labels = inputs.cuda(), labels.cuda()
+            outputs = net(inputs)
+            logits.append(torch.softmax(outputs, dim=1))
+        return torch.cat(logits, dim=0)
 
 def test(epoch, nets):
     nets = [net.eval() for net in nets]
@@ -194,7 +208,7 @@ def test(epoch, nets):
     total = 0
     global best_acc, best_acc_after_sf
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
+        for batch_idx, (inputs, targets) in tqdm(enumerate(test_loader)):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs_all = [net(inputs) for net in nets]
             outputs = sum(outputs_all)
@@ -209,13 +223,13 @@ def test(epoch, nets):
 
     if acc > best_acc and epoch>warm_up:
         best_acc = acc
-        best_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_best.pth') 
+        best_checkpoint = os.path.join(args.project_name, running_name + '_best.pth') 
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
     if acc_after_sf > best_acc_after_sf and epoch>warm_up:
         best_acc_after_sf = acc_after_sf
-        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name+'_' + str(epoch) + '_best.pth') 
+        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth') 
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
     wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf}) if args.wandb else None
@@ -223,12 +237,45 @@ def test(epoch, nets):
     sys.stdout.write('%s: | Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n' %(args.dataset, epoch, acc, acc_after_sf))
     sys.stdout.flush()
 
+    return acc, acc_after_sf
+
+def eval_train_mv(nets, mv_loader): # mv_loader: the dataloader for majority vote.
+    """
+    here, I want to write a function to evaluate the training data using the majority vote labels.
+    """
+    nets = [net.eval() for net in nets]
+    correct = [0 for _ in range(num_networks)]
+    correct_after_sf = [0 for _ in range(num_networks)]
+    total = 0
+    # In this function, we don't need to sum all the outputs. We just need to get the outputs of each network.
+    with torch.no_grad():
+        for batch_idx, (inputs, targets, index) in enumerate(mv_loader):
+            inputs, targets = inputs.cuda(), targets.cuda()
+            outputs_all = [net(inputs) for net in nets]
+            outputs_after_sf = [torch.softmax(output, dim=1) for output in outputs_all]
+            predicted = [torch.max(output, dim=1)[1] for output in outputs_all]
+            predicted_after_sf = [torch.max(output, dim=1)[1] for output in outputs_after_sf]
+            total += targets.size(0)
+            for i in range(num_networks):
+                correct[i] += predicted[i].eq(targets).cpu().sum().item() 
+                correct_after_sf[i] += predicted_after_sf[i].eq(targets).cpu().sum().item()
+    acc = [correct[i]/total for i in range(num_networks)]
+    acc_after_sf = [correct_after_sf[i]/total for i in range(num_networks)]
+
+    for i in range(len(acc)):
+        wandb.log({f'\n Evaluation MV Accuracy_wo_sf_net{i+1}': 100.*acc[i], f'Evaluation MV Accuracy_w_sf_net{i+1}': 100. *acc_after_sf[i]}) if args.wandb else None
+        sys.stdout.write('\n %s: | Evaluation MV Accuracy_wo_sf_net%d: %.2f%%, Evaluation MV Accuracy_w_sf_net%d: %.2f%%,\n' %(args.dataset, i+1, 100.*acc[i], i+1, 100.*acc_after_sf[i]))
+        sys.stdout.flush()
+
+    return acc, acc_after_sf
+
+
 def eval_train(model, eval_loader):  
     """
     model & annotator: net2 for annotator1 | net1 for annotator2.
     """  
     model.eval()
-    losses = torch.zeros(50000)    
+    losses = torch.zeros(50000) # actually, the size of the dataset should be changed.    
     with torch.no_grad():
         for batch_idx, (inputs, targets, index) in enumerate(eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda() 
@@ -293,13 +340,60 @@ def adjust_learning_rate(args, optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-warm_up = args.warm_up_epochs
+def calculate_cosine_similarity(logits1, logits2):
+    # Calculate the cosine similarity between two logits
+    """
+    logits1: torch.Tensor
+        The logits of the first model.
+    logits2: torch.Tensor
+        The logits of the second model.
+    """
+    if logits1.shape != logits2.shape:
+        raise ValueError("The shapes of the logits should be the same.")
+    
+    similarity = torch.mean(F.cosine_similarity(logits1, logits2, dim=1))
+    return 1.0 - similarity
 
+
+def choose_high_probability_comparied_model(similarity_matrix, num_nets, accuracy):
+    """
+    similarity_matrix: torch.Tensor
+        The similarity matrix between the models.
+    num_nets: int
+        The number of the models.
+    accuracy: torch.Tensor
+        The accuracy of the models.
+        """
+    # Normalize the similarity matrix
+    sample_index = []
+    similarity_matrix = torch.clamp(similarity_matrix, min=0)
+    # The below codes for calculating the similarity matrix are same.
+    # similarity_matrix *= torch.tensor(accuracy).unsqueeze(1).expand(-1, 3) 
+    similarity_matrix *= torch.tensor(accuracy)[None, :]
+    # similarity_matrix = similarity_matrix / similarity_matrix.sum()
+
+    for i in range(num_nets):
+        flattened_similarity = torch.flatten(similarity_matrix)
+        flattened_similarity /= flattened_similarity.sum()
+        sample = torch.multinomial(flattened_similarity, num_samples=1, replacement=False)
+        num_cols = similarity_matrix.shape[1]
+        col_index = sample % num_cols 
+        row_index = torch.div(sample, num_cols, rounding_mode='floor')
+        # sample_2d_index = torch.stack((row_index, col_index), dim=1)
+        sample_2d_index = (row_index, col_index)
+        sample_index.append(sample_2d_index)
+        similarity_matrix[row_index, :] = 0
+
+    return sample_index # return the index of the models.
+
+warm_up = args.warm_up_epochs
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
     root_dir=args.data_path, noise_file=args.noise_file)
 
 print('****** Building net ******')
 nets = [create_model() for _ in range(len(annotators))]
+print('****** Building copy net ******')
+nets_copy = [create_model() for _ in range(len(annotators))]
 cudnn.benchmark = True
 
 criterion = SemiLoss()
@@ -334,40 +428,88 @@ if args.resume:
 else:
     start_epoch = 0
 
+num_networks = len(annotators)
+similarity_matrix = torch.zeros((num_networks, num_networks))
+test_loader = loader.run('test')
+eval_loaders = [loader.run('eval_train', annotator=annotators[i]) for i in range(num_networks)]
+mv_eval_loader = loader.run('eval_train', annotator=mv_annotator)
+
+last_5_acc = []
+last_5_acc_after_sf = []
+
 for epoch in range(start_epoch, args.num_epochs+1):    
+    logits_list = []
     for optimizer in optimizers:
         adjust_learning_rate(args, optimizer, epoch) 
-    
-    test_loader = loader.run('test')
-    eval_loaders = [loader.run('eval_train', annotator=annotators[i]) for i in range(len(annotators))]
+
     if epoch<warm_up:
         warmup_trainloaders = [loader.run('warmup', annotator=annotators[i]) for i in range(len(annotators))]
         for i, (net, optimizer, warmup_trainloader) in enumerate(zip(nets, optimizers, warmup_trainloaders)):
             print(f'Warmup Net{i+1}: ')
-            warmup(epoch, net, optimizer, warmup_trainloader)       
-   
+            logits = warmup(epoch, net, optimizer, warmup_trainloader) # logits: (batch_size*num_iteration, num_class)
+            logits_list.append(logits)
+        # ipdb.set_trace()
+        for i in range(num_networks):
+            for j in range(num_networks):
+                similarity_matrix[i, j] = calculate_cosine_similarity(logits_list[i], logits_list[j]) # I checked the similarity matrix, it is correct. it is a Symmetric Matrices.
     else:
-        for i in range(len(annotators)):
-            model_choices = list(range(len(annotators)))
-            model_choices.remove(i)
-            model_choice = random.choice(model_choices)
+        for i, net in enumerate(nets):
+            nets_copy[i].load_state_dict(net.state_dict())
 
-            prob = eval_train(nets[model_choice], eval_loader=eval_loaders[i])
+        for index in samples_index:
+            stu_index, tea_index = index[0], index[1] # student index and teacher index.
+            prob = eval_train(nets[stu_index], eval_loader=eval_loaders[stu_index])
             pred = (prob > args.p_threshold)
-            print('\n Train Net%d' % (i+1))
-            labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[i]) # co-divide
-            train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader)
-            # Save the model as the latest one. 
-            if epoch % 10 == 0:
-                torch.save({
-                            'epoch': epoch,
-                            'nets': {f'net{i+1}': net.state_dict() for i, net in enumerate(nets)},
-                            'optimizers': {f'optimizer{i+1}': optimizer.state_dict() for i, optimizer in enumerate(optimizers)},
-                            'best_acc': best_acc,
-                            'best_acc_after_sf': best_acc_after_sf
-                        }, latest_checkpoint)
-                
-                print('\nSaving Checkpoint to %s \n' % latest_checkpoint)
+            print('\n Student Network: ', stu_index, ' Teacher Network: ', tea_index)
+            labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[stu_index]) # co-divide
+            train(epoch, nets[stu_index], nets_copy[tea_index], optimizers[stu_index], labeled_trainloader, unlabeled_trainloader)
 
-    test(epoch, nets)
+        # Save the model as the latest one. 
+        if epoch % 10 == 0:
+            torch.save({
+                        'epoch': epoch,
+                        'nets': {f'net{i+1}': net.state_dict() for i, net in enumerate(nets)},
+                        'optimizers': {f'optimizer{i+1}': optimizer.state_dict() for i, optimizer in enumerate(optimizers)},
+                        'best_acc': best_acc,
+                        'best_acc_after_sf': best_acc_after_sf
+                    }, latest_checkpoint)
+            
+            print('\n Saving Checkpoint to %s \n' % latest_checkpoint)
+
+        # here, calculate the similarity matrix between the models.
+        print('\n Calculating the similarity matrix between the models.')
+        for i in range(num_networks):
+            logits = calculating_logits(nets[i], warmup_trainloaders[i])
+            logits_list.append(logits) 
+    
+        # Update the sample index.
+        for i in range(num_networks):
+            for j in range(num_networks):
+                similarity_matrix[i, j] = calculate_cosine_similarity(logits_list[i], logits_list[j])
+
+    print('\n Evaluating the models using the majority vote labels.')    
+    _, eval_acc_sf = eval_train_mv(nets, mv_eval_loader)
+    samples_index = choose_high_probability_comparied_model(similarity_matrix, num_networks, eval_acc_sf)
+
+    print('\n Testing the models.') 
+    acc, acc_after_sf = test(epoch, nets)
+
+    # Append current epoch accuracies to the lists
+    if epoch > args.num_epochs - 6:
+        last_5_acc.append(acc)
+        last_5_acc_after_sf.append(acc_after_sf)
+
+        # Keep only the last 5 epochs
+        if len(last_5_acc) > 5:
+            last_5_acc.pop(0)
+        if len(last_5_acc_after_sf) > 5:
+            last_5_acc_after_sf.pop(0)
+
+        # Calculate average accuracy for the last 5 epochs
+        avg_acc_last_5 = sum(last_5_acc) / len(last_5_acc)
+        avg_acc_after_sf_last_5 = sum(last_5_acc_after_sf) / len(last_5_acc_after_sf)
+
+        # Log the average accuracies
+        wandb.log({'Average_Accuracy_Last_5_Epochs': avg_acc_last_5, 'Average_Accuracy_After_SF_Last_5_Epochs': avg_acc_after_sf_last_5}) if args.wandb else None
+        print("\n| Average Accuracy for Last 5 Epochs: %.2f%%, Average Accuracy After SF for Last 5 Epochs: %.2f%%\n" % (avg_acc_last_5, avg_acc_after_sf_last_5))
         
