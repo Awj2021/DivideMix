@@ -458,7 +458,7 @@ for epoch in range(start_epoch, args.num_epochs+1):
 
         for index in samples_index:
             stu_index, tea_index = index[0], index[1] # student index and teacher index.
-            prob = eval_train(nets[stu_index], eval_loader=eval_loaders[stu_index])
+            prob = eval_train(nets[tea_index], eval_loader=eval_loaders[stu_index])
             pred = (prob > args.p_threshold)
             print('\n Student Network: ', stu_index, ' Teacher Network: ', tea_index)
             labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[stu_index]) # co-divide
