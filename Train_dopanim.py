@@ -154,12 +154,13 @@ def test(net1,net2,test_loader):
     correct = 0
     correct_w_sf = 0
     total = 0
+    test_loss = 0  # Initialize test loss
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)       
             outputs2 = net2(inputs)           
-            outputs = outputs1+outputs2
+            outputs = outputs1 + outputs2
             outputs_w_sf = (F.softmax(outputs1, dim=1) + F.softmax(outputs2, dim=1)) / 2
             _, predicted = torch.max(outputs, 1)  
             _, predicted_w_sf = torch.max(outputs_w_sf, 1)          
@@ -167,11 +168,19 @@ def test(net1,net2,test_loader):
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item()       
             correct_w_sf += predicted_w_sf.eq(targets).cpu().sum().item()
+            
+            # Calculate loss for the current batch
+            loss = CEloss(outputs, targets)
+            test_loss += loss.item() * targets.size(0)  # Accumulate loss
+
     acc = 100.*correct/total
     acc_w_sf = 100.*correct_w_sf/total
+    test_loss /= total  # Average test loss
+
     print("\n| Test Acc: %.2f%%\n" %(acc))  
     print("\n| Test Acc with Softmax: %.2f%%\n" %(acc_w_sf))
-    wandb.log({"test_acc_wo_sf": acc, "test_acc_w_sf": acc_w_sf, "epch": epoch}) if args.wandb else None
+    print("\n| Test Loss: %.4f\n" % (test_loss))
+    wandb.log({"test_acc_wo_sf": acc, "test_acc_w_sf": acc_w_sf, "test_loss": test_loss, "epch": epoch}) if args.wandb else None
 
     
 def eval_train(epoch,model):
