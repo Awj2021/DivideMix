@@ -5,43 +5,49 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
+import torchvision
+import torchvision.models as models
 import random
 import os
 import argparse
 import numpy as np
-from PreResNet import *
+import dataloader_dopanim as dataloader
 from sklearn.mixture import GaussianMixture
-import dataloader_cifar as dataloader
 import wandb
+import ipdb
 import math
 import torch.nn.functional as F
+from tqdm import tqdm 
+from Dino import get_dino
 
  
-parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
-parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
-parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
-parser.add_argument('--noise_mode',  default='sym')
+parser = argparse.ArgumentParser(description='PyTorch Dopanim Training')
+parser.add_argument('--batch_size', default=32, type=int, help='train batchsize') 
+parser.add_argument('--lr', '--learning_rate', default=0.002, type=float, help='initial learning rate')
 parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
+parser.add_argument('--lr_decay_rate', default=0.1, type=float, help='decay rate for learning rate')
 parser.add_argument('--lambda_u', default=0, type=float, help='weight for unsupervised loss')
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
-parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
+parser.add_argument('--num_epochs', default=100, type=int)
+parser.add_argument('--warm_up_epochs', default=10, type=int)
+parser.add_argument('--data_path', default='./dopanim', type=str, help='path to dataset')
+parser.add_argument('--noise_file', default='dopanim_worst-4.json', type=str, help='path to noise file')
 parser.add_argument('--seed', default=123)
-parser.add_argument('--gpuid', default=1, type=int)
-parser.add_argument('--num_class', default=10, type=int)
-parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
-parser.add_argument('--dataset', default='cifar10', type=str)
-parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
-parser.add_argument('--noise_file', default='Regenerated_Simulated_Human.pt', type=str, help='name of the noise file.')
-parser.add_argument('--num_epochs', default=300, type=int)
-parser.add_argument('--warm_up_epochs', default=30, type=int, help='number of warm-up epochs.')
+parser.add_argument('--gpuid', default=0, type=int)
+parser.add_argument('--num_class', default=15, type=int)
+parser.add_argument('--dataset', default='dopanim', type=str)
+parser.add_argument('--project_name', default='DivideMix-dopanim-training', type=str, help='name of the wandb project.')
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
-# parser.add_argument('--annotator', default='random_label1', type=str, help='name of the annotator.')
-parser.add_argument('--annotator', default='', type=str, help='name of the annotator.')
-parser.add_argument('--model', default='resnet18', type=str, help='name of the model.')
+parser.add_argument('--annotator', default='label1', type=str, help='name of the annotator.')
+parser.add_argument('--model', default='resnet34', type=str, help='name of the model.')
 parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
 parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
+parser.add_argument('--penalty', action='store_true', default=False,
+                    help='use penalty')
+parser.add_argument('--noise_type', default='worst', type=str, choices=['worst', 'rand'], help='type of the noise.')
+
 parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
 
 args = parser.parse_args()
@@ -54,17 +60,19 @@ torch.cuda.manual_seed_all(args.seed)
 if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 
-if args.annotator == 'three_annotators':
-    annotators = ['random_label1', 'random_label2', 'random_label3']
+if args.annotator == 'two_annotators':
+    annotators = ['label1', 'label2']
+    args.noise_file = 'dopanim_' + args.noise_type + '-2.json'
+elif args.annotator == 'three_annotators':
+    annotators = ['label1', 'label2', 'label3']
+    args.noise_file = 'dopanim_' + args.noise_type + '-3.json'
 elif args.annotator == 'four_annotators':
-    annotators = ['random_label1', 'random_label2', 'random_label3', 'random_label4']
-elif args.annotator == 'five_annotators':
-    annotators = ['random_label1', 'random_label2', 'random_label3', 'random_label4', 'random_label5']
-elif args.annotator == 'six_annotators':
-    annotators = ['random_label1', 'random_label2', 'random_label3', 'random_label4', 'random_label5', 'random_label6']
+    annotators = ['label1', 'label2', 'label3', 'label4']
+    args.noise_file = 'dopanim_' + args.noise_type + '-4.json'
 else:
     raise ValueError('The annotator should be specified {}.'.format(args.annotator))
 
+mv_annotator = 'mv_label'  # Four annotators' majority vote label.
 running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.lambda_u) + '_' + str(len(annotators))
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
@@ -75,7 +83,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
       
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
-    for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):  # random_label3labels_x is the target label.    
+    for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):  # labels_x is the target label.    
         try:
             inputs_u, inputs_u2 = unlabeled_train_iter.next()
         except:
@@ -89,6 +97,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
 
         inputs_x, inputs_x2, labels_x, w_x = inputs_x.cuda(), inputs_x2.cuda(), labels_x.cuda(), w_x.cuda()
         inputs_u, inputs_u2 = inputs_u.cuda(), inputs_u2.cuda()
+
         with torch.no_grad():
             # label co-guessing of unlabeled samples
             outputs_u11 = net(inputs_u)
@@ -116,7 +125,6 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         # mixmatch
         l = np.random.beta(args.alpha, args.alpha)        
         l = max(l, 1-l)
-                
         all_inputs = torch.cat([inputs_x, inputs_x2, inputs_u, inputs_u2], dim=0) # shape: (4*batch_size, 3, 32, 32)
         all_targets = torch.cat([targets_x, targets_x, targets_u, targets_u], dim=0) # shape: (4*batch_size, num_class)
 
@@ -125,94 +133,92 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         input_a, input_b = all_inputs, all_inputs[idx]
         target_a, target_b = all_targets, all_targets[idx]
         
-        mixed_input = l * input_a + (1 - l) * input_b       
-        mixed_target = l * target_a + (1 - l) * target_b # The ground truth labels of mixed data for calculating the loss.
+        mixed_input = l * input_a[:batch_size*2] + (1 - l) * input_b[:batch_size*2]        
+        mixed_target = l * target_a[:batch_size*2] + (1 - l) * target_b[:batch_size*2]
                 
         logits = net(mixed_input)
-        logits_x = logits[:batch_size*2] # refer to the all_inputs. [inputs_x, inputs_x2, xxx]
-        logits_u = logits[batch_size*2:] # refer to the all_inputs. [xxx, xxx, inputs_u, inputs_u2]
         
-        # For debugging, I found that the Lu is not 0. Just it is very tiny, like 0.0001.
-        Lx, Lu, lamb = criterion(logits_x, mixed_target[:batch_size*2], logits_u, mixed_target[batch_size*2:], epoch+batch_idx/num_iter, warm_up)
+        Lx = -torch.mean(torch.sum(F.log_softmax(logits, dim=1) * mixed_target, dim=1))
+        
+        # regularization
         prior = torch.ones(args.num_class)/args.num_class
         prior = prior.cuda()        
         pred_mean = torch.softmax(logits, dim=1).mean(0)
         penalty = torch.sum(prior*torch.log(prior/pred_mean))
-
-        loss = Lx + lamb * Lu  + penalty
+       
+        loss = Lx + penalty
+        
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        wandb.log({"train_loss": loss.item(), "labeled_loss": Lx.item(), "penalty": penalty.item()}) if args.wandb else None
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item(), 'lamb': lamb}) if args.wandb else None
 
 def warmup(epoch,net,optimizer,dataloader):
     net.train()
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
-    for batch_idx, (inputs, labels, index) in enumerate(dataloader):      
+    for batch_idx, (inputs, labels, path, index) in tqdm(enumerate(dataloader)):      
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
-        outputs = net(inputs)               
-        loss = CEloss(outputs, labels)      
-        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-        #     penalty = conf_penalty(outputs)
-        #     L = loss + penalty      
-        # elif args.noise_mode=='sym':   
-        L = loss
+        outputs = net(inputs)
+        loss = CEloss(outputs, labels)        
+        if args.penalty:
+            penalty = conf_penalty(outputs)
+            L = loss + penalty
+        else:
+            L = loss
         L.backward()  
         optimizer.step() 
         wandb.log({'  epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
+
 
 def test(epoch, nets):
     nets = [net.eval() for net in nets]
     correct = 0
     correct_after_sf = 0
     total = 0
-    total_loss = 0.0  # Initialize total loss
-    criterion = nn.CrossEntropyLoss()  # Define the loss function
+    test_loss = 0  # Initialize test loss
     global best_acc, best_acc_after_sf
-
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(test_loader):
+        for batch_idx, (inputs, targets) in tqdm(enumerate(test_loader)):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs_all = [net(inputs) for net in nets]
             outputs = sum(outputs_all)
-            outputs_after_sf = sum([torch.softmax(output, dim=1) for output in outputs_all]) / len(outputs_all)
-
-            # Calculate loss for the current batch
-            loss = criterion(outputs_after_sf, targets)  # the loss is calculated on the softmax outputs.
-            total_loss += loss.item() * targets.size(0)  # Accumulate loss (scaled by batch size)
-
-            _, predicted = torch.max(outputs, 1)
-            _, predicted_after_sf = torch.max(outputs_after_sf, 1)
+            outputs_after_sf = sum([torch.softmax(output, dim=1) for output in outputs_all])/len(outputs_all)
+            _, predicted = torch.max(outputs, 1)            
+            _, predicted_after_sf = torch.max(outputs_after_sf, 1)           
             total += targets.size(0)
-            correct += predicted.eq(targets).cpu().sum().item()
+            correct += predicted.eq(targets).cpu().sum().item() 
             correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
+            
+            # Calculate loss for the current batch
+            loss = CEloss(outputs, targets)
+            test_loss += loss.item() * targets.size(0)  # Accumulate loss
 
-    acc = 100. * correct / total
-    acc_after_sf = 100. * correct_after_sf / total
-    avg_loss = total_loss / total  # Calculate average loss
+    acc = 100.*correct/total
+    acc_after_sf = 100.*correct_after_sf/total
+    test_loss /= total  # Average test loss
 
-    if acc > best_acc and epoch > warm_up:
+    if acc > best_acc and epoch>warm_up:
         best_acc = acc
-        best_checkpoint = os.path.join(args.project_name, running_name + '_best.pth')
+        best_checkpoint = os.path.join(args.project_name, running_name + '_best.pth') 
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
-    if acc_after_sf > best_acc_after_sf and epoch > warm_up:
+    if acc_after_sf > best_acc_after_sf and epoch>warm_up:
         best_acc_after_sf = acc_after_sf
-        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth')
+        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth') 
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
-    # Log metrics to wandb
-    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf, 'Test_Loss': avg_loss}) if args.wandb else None
-
-    print("\n| Test Epoch #%d\t Loss: %.4f\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %
-          (epoch, avg_loss, acc, acc_after_sf))
+    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf, 'Test_Loss': test_loss,
+               'Acc_Best_wo_sf': best_acc, "Acc_Best_w_sf": best_acc_after_sf}) if args.wandb else None
+    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%, Test Loss: %.4f\n" 
+          % (epoch, acc, acc_after_sf, test_loss))  
 
     return acc, acc_after_sf
+
 
 def eval_train(model, eval_loader):  
     """
@@ -220,34 +226,30 @@ def eval_train(model, eval_loader):
     """  
     model.eval()
     num_samples = len(eval_loader.dataset)
-    losses = torch.zeros(num_samples)  # Initialize the loss tensor
+    losses = torch.zeros(num_samples) # actually, the size of the dataset should be changed.    
+    paths = []
     with torch.no_grad():
-        for batch_idx, (inputs, targets, index) in enumerate(eval_loader):
+        for batch_idx, (inputs, targets, path, index) in enumerate(eval_loader):
+            # ipdb.set_trace()
             inputs, targets = inputs.cuda(), targets.cuda() 
             outputs = model(inputs) 
             loss = CE(outputs, targets)  
             for b in range(inputs.size(0)):
-                losses[index[b]]=loss[b]  # save the loss for each sample.        
+                losses[index[b]]=loss[b] 
+                paths.append(path[b])
     losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
-    input_loss = losses.reshape(-1,1)
+    losses = losses.reshape(-1,1)
     gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
-    gmm.fit(input_loss)
-    prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
+    gmm.fit(losses)
+    prob = gmm.predict_proba(losses)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
     prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
-    return prob
+    # prob = prob[:,cluster_means.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,)
+    return prob, paths
 
 def linear_rampup(current, warm_up, rampup_length=16):
     current = np.clip((current-warm_up) / rampup_length, 0.0, 1.0)
     return args.lambda_u*float(current)
 
-class SemiLoss(object):
-    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, warm_up):
-        probs_u = torch.softmax(outputs_u, dim=1)
-
-        Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
-        Lu = torch.mean((probs_u - targets_u)**2)
-
-        return Lx, Lu, linear_rampup(epoch,warm_up)
 
 class NegEntropy(object):
     def __call__(self,outputs):
@@ -255,14 +257,24 @@ class NegEntropy(object):
         return torch.mean(torch.sum(probs.log()*probs, dim=1))
 
 def create_model():
+    # if args.model == 'resnet18': # Please make sure that the model has the pre activate layer.
+    #     model = ResNet18(num_classes=args.num_class)
     if args.model == 'resnet18':
-        model = ResNet18(num_classes=args.num_class)
+        model = models.resnet18(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(model.fc.in_features,args.num_class)
+
     elif args.model == 'resnet34':
-        model = ResNet34(num_classes=args.num_class)
+        model = models.resnet34(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(model.fc.in_features,args.num_class)
+
     elif args.model == 'resnet50':
-        model = ResNet50(num_classes=args.num_class)
+        model = models.resnet50(weights='IMAGENET1K_V1')
+        model.fc = nn.Linear(model.fc.in_features, args.num_class)
+    elif args.model == 'dino':
+        model = get_dino(n_classes=args.num_class, dropout=0.5) # it includes the fc layers.
     else:
         raise ValueError('Model not supported.')
+    
     model = model.cuda()
     return model
 
@@ -272,10 +284,6 @@ def adjust_learning_rate(args, optimizer, epoch):
     if args.cosine:
         eta_min = lr * (args.lr_decay_rate ** 3)
         lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / args.num_epochs)) / 2
-    # else:
-    #     steps = np.sum(epoch > np.asarray(args.lr_decay_epochs))
-    #     if steps > 0:
-    #         lr = lr * (args.lr_decay_rate ** steps)
     else:
         if epoch%150==0 and epoch>0:  # put the original learning rate here. Just for 300 epochs.
             lr *= args.lr_decay_rate
@@ -284,16 +292,19 @@ def adjust_learning_rate(args, optimizer, epoch):
         param_group['lr'] = lr
 
 warm_up = args.warm_up_epochs
-
-loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
-    root_dir=args.data_path, noise_file=args.noise_file)
+loader = dataloader.dopanim_dataloader(noise_file=args.noise_file, batch_size=args.batch_size, num_workers=5, root=args.data_path)
 
 print('****** Building net ******')
 nets = [create_model() for _ in range(len(annotators))]
+
 cudnn.benchmark = True
 
-criterion = SemiLoss()
-optimizers = [optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4) for net in nets]
+if args.model.startswith('resnet'):
+    optimizers = [optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4) for net in nets]
+elif args.model == 'dino':
+    optimizers = [optim.AdamW(net.parameters(), lr=args.lr, weight_decay=0) for net in nets] # following the original implementation of dopanim.
+else:
+    raise ValueError('Model not supported.')
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
 
@@ -322,54 +333,69 @@ if args.resume:
 else:
     start_epoch = 0
 
+num_networks = len(annotators)
+test_loader = loader.run('test', annotator='gt_label')
+eval_loaders = [loader.run('eval_train', annotator=annotators[i]) for i in range(num_networks)]
+
 last_5_acc = []
 last_5_acc_after_sf = []
 
+if args.penalty:
+    conf_penalty = NegEntropy()
+
 for epoch in range(start_epoch, args.num_epochs+1):    
+    logits_list = []
     for optimizer in optimizers:
         adjust_learning_rate(args, optimizer, epoch) 
-    
-    test_loader = loader.run('test')
-    eval_loaders = [loader.run('eval_train', annotator=annotators[i]) for i in range(len(annotators))]
+
     if epoch<warm_up:
         warmup_trainloaders = [loader.run('warmup', annotator=annotators[i]) for i in range(len(annotators))]
         for i, (net, optimizer, warmup_trainloader) in enumerate(zip(nets, optimizers, warmup_trainloaders)):
             print(f'Warmup Net{i+1}: ')
-            warmup(epoch, net, optimizer, warmup_trainloader)       
-   
+            warmup(epoch, net, optimizer, warmup_trainloader) # logits: (batch_size*num_iteration, num_class)
     else:
-        for i in range(len(annotators)):
-            model_choices = list(range(len(annotators)))
+        for i in range(num_networks):
+            model_choices = list(range(num_networks))
             model_choices.remove(i)
             model_choice = random.choice(model_choices)
-
-            prob = eval_train(nets[model_choice], eval_loader=eval_loaders[i])
+            
+            prob, paths = eval_train(nets[model_choice], eval_loader=eval_loaders[i])
             pred = (prob > args.p_threshold)
-            print('\n Train Net%d' % (i+1))
-            labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[i]) # co-divide
+            print('\n Student Network: ', i, ' Teacher Network: ', model_choice)
+            labeled_trainloader, unlabeled_trainloader = loader.run('train',annotators[i], pred, prob, paths) # co-divide
             train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader)
-            # Save the model as the latest one. 
-            if epoch % 10 == 0:
-                torch.save({
-                            'epoch': epoch,
-                            'nets': {f'net{i+1}': net.state_dict() for i, net in enumerate(nets)},
-                            'optimizers': {f'optimizer{i+1}': optimizer.state_dict() for i, optimizer in enumerate(optimizers)},
-                            'best_acc': best_acc,
-                            'best_acc_after_sf': best_acc_after_sf
-                        }, latest_checkpoint)
-                
-                print('\nSaving Checkpoint to %s \n' % latest_checkpoint)
 
+        # Save the model as the latest one. 
+        if epoch % 10 == 0:
+            torch.save({
+                        'epoch': epoch,
+                        'nets': {f'net{i+1}': net.state_dict() for i, net in enumerate(nets)},
+                        'optimizers': {f'optimizer{i+1}': optimizer.state_dict() for i, optimizer in enumerate(optimizers)},
+                        'best_acc': best_acc,
+                        'best_acc_after_sf': best_acc_after_sf
+                    }, latest_checkpoint)
+            
+            print('\n Saving Checkpoint to %s \n' % latest_checkpoint)
+
+        # here, calculate the similarity matrix between the models.
+        print('\n Calculating the similarity matrix between the models.')
+
+    print('\n Testing the models.') 
     acc, acc_after_sf = test(epoch, nets)
     if epoch > args.num_epochs - 6:
         last_5_acc.append(acc)
         last_5_acc_after_sf.append(acc_after_sf)
 
+        # Keep only the last 5 epochs
         if len(last_5_acc) > 5:
             last_5_acc.pop(0)
+        if len(last_5_acc_after_sf) > 5:
             last_5_acc_after_sf.pop(0)
-    
+
+        # Calculate average accuracy for the last 5 epochs
         avg_acc_last_5 = sum(last_5_acc) / len(last_5_acc)
         avg_acc_after_sf_last_5 = sum(last_5_acc_after_sf) / len(last_5_acc_after_sf)
 
-        wandb.log({'avg_acc_last_5': avg_acc_last_5, 'avg_acc_after_sf_last_5': avg_acc_after_sf_last_5}) if args.wandb else None
+        # Log the average accuracies
+        wandb.log({'Average_Accuracy_Last_5_Epochs': avg_acc_last_5, 'Average_Accuracy_After_SF_Last_5_Epochs': avg_acc_after_sf_last_5}) if args.wandb else None
+        print("\n| Average Accuracy for Last 5 Epochs: %.2f%%, Average Accuracy After SF for Last 5 Epochs: %.2f%%\n" % (avg_acc_last_5, avg_acc_after_sf_last_5))
