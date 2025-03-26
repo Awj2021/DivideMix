@@ -19,10 +19,8 @@ import wandb
 import math
 from PreResNet import ResNet18, ResNet34, ResNet50 
 from tqdm import tqdm
+from Dino import get_dino
 
-
-# TODO:
-# 1. copy the dataset into the data folder.
 parser = argparse.ArgumentParser(description='PyTorch Dopanim Training')
 parser.add_argument('--batch_size', default=32, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.002, type=float, help='initial learning rate')
@@ -41,8 +39,9 @@ parser.add_argument('--project_name', default='dopanim-training', type=str, help
 parser.add_argument('--dataset', default='choayang', type=str, help='name of the dataset.')
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
 parser.add_argument('--annotator', default='rand_label1', type=str, help='name of the annotator.')
-parser.add_argument('--model', default='resnet34', type=str, help='name of the model.')
+parser.add_argument('--model', default='resnet34', choices=['resnet34', 'resnet18', 'dino'], type=str, help='name of the model.')
 parser.add_argument('--cosine', action='store_true', help='use cosine annealing.')
+parser.add_argument('--noise_file', default='dopanim_worst-4.json', type=str, help='name of the noise file.')
 args = parser.parse_args()
 
 
@@ -58,7 +57,7 @@ torch.cuda.manual_seed_all(args.seed)
 def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     net.train()
     net2.eval() #fix one network and train the other
-    
+
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     # num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
     for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):      
@@ -155,6 +154,8 @@ def test(net1,net2,test_loader):
     correct_w_sf = 0
     total = 0
     test_loss = 0  # Initialize test loss
+    global best_acc, best_acc_w_sf
+
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
@@ -177,6 +178,18 @@ def test(net1,net2,test_loader):
     acc_w_sf = 100.*correct_w_sf/total
     test_loss /= total  # Average test loss
 
+    if acc > best_acc and epoch > args.warm_up_epochs:
+        best_acc = acc
+        checkpoint = os.path.join(args.project_name, running_name + '_best.pth')
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, checkpoint)
+        print('\nSaving Best Model to %s \n' % checkpoint)
+    
+    if acc_w_sf > best_acc_w_sf and epoch > args.warm_up_epochs:
+        best_acc_w_sf = acc_w_sf
+        checkpoint = os.path.join(args.project_name, running_name + '_best_w_sf.pth')
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, checkpoint)
+        print('\nSaving Best Model with Softmax to %s \n' % checkpoint)
+
     print("\n| Test Acc: %.2f%%\n" %(acc))  
     print("\n| Test Acc with Softmax: %.2f%%\n" %(acc_w_sf))
     print("\n| Test Loss: %.4f\n" % (test_loss))
@@ -186,7 +199,6 @@ def test(net1,net2,test_loader):
 def eval_train(epoch,model):
     print('\n==== evaluate next epoch training data loss ====')
     model.eval()
-    # num_samples = args.num_batches*args.batch_size  # TODO: the num_samples should be the length of the training dataset.
     num_samples = len(eval_loader.dataset)
     losses = torch.zeros(num_samples)
     paths = []
@@ -200,7 +212,6 @@ def eval_train(epoch,model):
             for b in range(inputs.size(0)):
                 losses[index[b]]=loss[b]  
                 paths.append(path[b])
-    # ipdb.set_trace()
     losses = (losses-losses.min())/(losses.max()-losses.min())    
     losses = losses.reshape(-1,1)
     gmm = GaussianMixture(n_components=2,max_iter=10,reg_covar=5e-4,tol=1e-2)
@@ -240,6 +251,8 @@ def create_model():
     elif args.model == 'resnet50':
         model = models.resnet50(weights='IMAGENET1K_V1')
         model.fc = nn.Linear(model.fc.in_features, args.num_class)
+    elif args.model == 'dino':
+        model = get_dino(n_classes=args.num_class, dropout=0.5) # it includes the fc layers.
     else:
         raise ValueError('Model not supported.')
     
@@ -248,15 +261,26 @@ def create_model():
 
 
 # loader = dataloader.chaoyang_dataloader(root=args.data_path, batch_size=args.batch_size, num_workers=5, annotator=args.annotator)
-loader = dataloader.dopanim_dataloader(root=args.data_path, batch_size=args.batch_size, num_workers=5, annotator=args.annotator)
+loader = dataloader.dopanim_dataloader(root=args.data_path, noise_file=args.noise_file, batch_size=args.batch_size, num_workers=5, annotator=args.annotator)
 
 print('| Building net')
 net1 = create_model()
 net2 = create_model()
 cudnn.benchmark = True
 
-optimizer1 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-3)
-optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-3)
+os.makedirs(args.project_name, exist_ok=True)
+
+best_acc = 0
+best_acc_w_sf = 0
+
+if args.model.startswith('resnet'):
+    optimizer1 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+    optimizer2 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+elif args.model == 'dino':
+    optimizer1 = optim.AdamW(net2.parameters(), lr=args.lr, weight_decay=0)
+    optimizer2 = optim.AdamW(net2.parameters(), lr=args.lr, weight_decay=0)
+else:
+    raise ValueError('Optimizer not supported.')
                       
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()

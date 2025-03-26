@@ -8,7 +8,7 @@ import os
 import ipdb
 
 class chaoyang_dataset(Dataset): 
-    def __init__(self, root, transform, mode, pred=None, probability=None, paths=None, annotator=''): 
+    def __init__(self, root, train_noise_file, transform, mode, pred=None, probability=None, paths=None, annotator=''): 
         
         self.root = root
         self.transform = transform
@@ -16,7 +16,7 @@ class chaoyang_dataset(Dataset):
         self.train_labels = {}
         self.test_labels = {}
 
-        train_json_file = os.path.join(self.root, 'dopanim_rand3.json')  # Firstly let us use the rand-3. (rand-3 / rand-4)
+        train_json_file = os.path.join(self.root, train_noise_file)  # Firstly let us use the rand-3. (rand-3 / rand-4)
         test_json_file = os.path.join(self.root, 'dopanim_test.json')
 
         if self.mode == 'test':
@@ -111,11 +111,12 @@ class chaoyang_dataset(Dataset):
             return len(self.train_imgs)            
         
 class dopanim_dataloader():  
-    def __init__(self, root, batch_size, num_workers, annotator):    
+    def __init__(self, root, noise_file, batch_size, num_workers, annotator):    
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.root = root
         self.annotator = annotator
+        self.noise_file = noise_file
                    
         self.transform_train = transforms.Compose([
                 transforms.Resize(232),
@@ -134,7 +135,7 @@ class dopanim_dataloader():
                 
     def run(self,mode,pred=[],prob=[],paths=[]):        
         if mode=='warmup':
-            warmup_dataset = chaoyang_dataset(self.root,transform=self.transform_train, mode='all', annotator=self.annotator)
+            warmup_dataset = chaoyang_dataset(self.root,self.noise_file,transform=self.transform_train, mode='all', annotator=self.annotator)
             warmup_loader = DataLoader(
                 dataset=warmup_dataset, 
                 batch_size=self.batch_size*2,
@@ -142,13 +143,13 @@ class dopanim_dataloader():
                 num_workers=self.num_workers)  
             return warmup_loader
         elif mode=='train':
-            labeled_dataset = chaoyang_dataset(self.root,transform=self.transform_train, mode='labeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
+            labeled_dataset = chaoyang_dataset(self.root,self.noise_file,transform=self.transform_train, mode='labeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
             labeled_loader = DataLoader(
                 dataset=labeled_dataset, 
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers)           
-            unlabeled_dataset = chaoyang_dataset(self.root,transform=self.transform_train, mode='unlabeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
+            unlabeled_dataset = chaoyang_dataset(self.root,self.noise_file,transform=self.transform_train, mode='unlabeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
             unlabeled_loader = DataLoader(
                 dataset=unlabeled_dataset, 
                 batch_size=int(self.batch_size),
@@ -156,7 +157,7 @@ class dopanim_dataloader():
                 num_workers=self.num_workers)   
             return labeled_loader,unlabeled_loader
         elif mode=='eval_train':
-            eval_dataset = chaoyang_dataset(self.root,transform=self.transform_test, mode='all', annotator=self.annotator)
+            eval_dataset = chaoyang_dataset(self.root,self.noise_file,transform=self.transform_test, mode='all', annotator=self.annotator)
             eval_loader = DataLoader(
                 dataset=eval_dataset, 
                 batch_size=self.batch_size,
@@ -164,7 +165,7 @@ class dopanim_dataloader():
                 num_workers=self.num_workers)          
             return eval_loader        
         elif mode=='test':
-            test_dataset = chaoyang_dataset(self.root,transform=self.transform_test, mode='test')
+            test_dataset = chaoyang_dataset(self.root,self.noise_file,transform=self.transform_test, mode='test')
             test_loader = DataLoader(
                 dataset=test_dataset, 
                 batch_size=self.batch_size,

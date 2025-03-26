@@ -14,4 +14,4 @@ set -e
 # lambda_u=$1
 # annotator=$2
 # $python Train_cifar.py --data_path ./cifar-100-python --project_name cifar100_IDN50_dividemix_cleanlab --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine --noise_file Simulated_Human.pt --num_class 100 --lambda_u $lambda_u --annotator $annotator --wandb 
-CUDA_VISIBLE_DEVICES=0 python Train_dopanim.py --data_path ./dopanim --project_name dopanim_baseline_single_label --dataset dopanim --num_epochs 100 --batch_size 32 --lr 0.002 --warm_up_epochs 1 --cosine --num_class 15 --lambda_u 0 --annotator mv_label --wandb
+python Train_dopanim.py --data_path ./dopanim --project_name dopanim_baseline_single_label --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 5 --cosine --num_class 15 --lambda_u 0 --gpuid 1 --annotator mv_label --noise_file dopanim_worst-2.json --wandb
