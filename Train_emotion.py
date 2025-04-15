@@ -11,7 +11,8 @@ import random
 import os
 import argparse
 import numpy as np
-import dataloader_dopanim as dataloader
+import dataloader_twitter
+import dataloader_flickr
 from sklearn.mixture import GaussianMixture
 import wandb
 import ipdb
@@ -21,7 +22,7 @@ from tqdm import tqdm
 from Dino import get_dino
 
  
-parser = argparse.ArgumentParser(description='PyTorch Dopanim Training')
+parser = argparse.ArgumentParser(description='PyTorch twitter Training')
 parser.add_argument('--batch_size', default=32, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.002, type=float, help='initial learning rate')
 parser.add_argument('--alpha', default=4, type=float, help='parameter for Beta')
@@ -31,8 +32,8 @@ parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probab
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
 parser.add_argument('--num_epochs', default=100, type=int)
 parser.add_argument('--warm_up_epochs', default=10, type=int)
-parser.add_argument('--data_path', default='./dopanim', type=str, help='path to dataset')
-parser.add_argument('--noise_file', default='dopanim_worst-4.json', type=str, help='path to noise file')
+parser.add_argument('--data_path', default='./Twitter', type=str, help='path to dataset')
+parser.add_argument('--noise_file', default='Twitter_worst-4.json', type=str, help='path to noise file')
 parser.add_argument('--seed', default=123)
 parser.add_argument('--gpuid', default=0, type=int)
 parser.add_argument('--num_class', default=15, type=int)
@@ -60,20 +61,31 @@ torch.cuda.manual_seed_all(args.seed)
 
 if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
+# According to the noise ratio, we have different noise files for considering. 
+# In the Twitter dataset, we have 8 annotators. and the distribution of each annotator looks like as below:
+# Annotator 0 noise rate: 0.589
+# Annotator 1 noise rate: 0.331
+# Annotator 2 noise rate: 0.200
+# Annotator 3 noise rate: 0.132
+# Annotator 4 noise rate: 0.133
+# Annotator 5 noise rate: 0.232
+# Annotator 6 noise rate: 0.400
+# Annotator 7 noise rate: 0.646
 
 if args.annotator == 'two_annotators':
-    annotators = ['label1', 'label2']
-    args.noise_file = 'dopanim_' + args.noise_type + '-2.json'
+    annotators = ['label_1', 'label_2']
+    # args.noise_file = 'Twitter_' + args.noise_type + '-2.json'
 elif args.annotator == 'three_annotators':
-    annotators = ['label1', 'label2', 'label3']
-    args.noise_file = 'dopanim_' + args.noise_type + '-3.json'
+    annotators = ['label_1', 'label_2', 'label_3']
+    # args.noise_file = 'Twitter_' + args.noise_type + '-3.json'
 elif args.annotator == 'four_annotators':
-    annotators = ['label1', 'label2', 'label3', 'label4']
-    args.noise_file = 'dopanim_' + args.noise_type + '-4.json'
+    annotators = ['label_1', 'label_2', 'label_3', 'label_4']
+    # args.noise_file = 'Twitter_' + args.noise_type + '-4.json'
 else:
     raise ValueError('The annotator should be specified {}.'.format(args.annotator))
 
-mv_annotator = 'mv_label'  # Four annotators' majority vote label.
+args.noise_file = 'train_LDL.json'
+mv_annotator = 'majority_vote'  # Four annotators' majority vote label.
 running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.lambda_u) + '_' + str(len(annotators))
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
@@ -293,8 +305,12 @@ def adjust_learning_rate(args, optimizer, epoch):
         param_group['lr'] = lr
 
 warm_up = args.warm_up_epochs
-loader = dataloader.dopanim_dataloader(noise_file=args.noise_file, batch_size=args.batch_size, num_workers=5, root=args.data_path)
-
+if args.dataset == 'Flickr':
+    loader = dataloader_flickr.flickr_dataloader(noise_file=args.noise_file, batch_size=args.batch_size, num_workers=5, root=args.data_path)
+elif args.dataset == 'Twitter':
+    loader = dataloader_twitter.twitter_dataloader(noise_file=args.noise_file, batch_size=args.batch_size, num_workers=5, root=args.data_path)
+else:
+    raise ValueError('Dataset not supported.')
 print('****** Building net ******')
 nets = [create_model() for _ in range(len(annotators))]
 
@@ -312,7 +328,7 @@ CEloss = nn.CrossEntropyLoss()
 best_acc = 0
 best_acc_after_sf = 0
 if not os.path.exists(args.project_name):
-    os.makedirs(args.project_name)
+    os.makedirs(args.project_name) 
 
 latest_checkpoint = os.path.join(args.project_name, running_name + '_' + 'latest.pth')
 

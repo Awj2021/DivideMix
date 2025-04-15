@@ -20,7 +20,8 @@ import torch.nn.functional as F
 from tqdm import tqdm 
 from Dino import get_dino
 
- 
+# TODO: 
+# since we would like to use multiple teachers, so firstly we test the 3 annotators. 
 parser = argparse.ArgumentParser(description='PyTorch Dopanim Training')
 parser.add_argument('--batch_size', default=32, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.002, type=float, help='initial learning rate')
@@ -49,9 +50,13 @@ parser.add_argument('--penalty', action='store_true', default=False,
 parser.add_argument('--noise_type', default='worst', type=str, choices=['worst', 'rand'], help='type of the noise.')
 
 parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
-# parser.add_argument('--running_suffix', default='', type=str, help='running suffix')
 
 args = parser.parse_args()
+
+# TODO: two things:
+# 1. add the model ema
+# 2. add the average model for splitting. 
+# 3. Extracting the features, and then do the classification. Please refer to the paper: anno-mix.
 
 torch.cuda.set_device(args.gpuid)
 random.seed(args.seed)
@@ -379,6 +384,7 @@ for epoch in range(start_epoch, args.num_epochs+1):
             print('\n Saving Checkpoint to %s \n' % latest_checkpoint)
 
         # here, calculate the similarity matrix between the models.
+        print('\n Calculating the similarity matrix between the models.')
 
     print('\n Testing the models.') 
     acc, acc_after_sf = test(epoch, nets)
