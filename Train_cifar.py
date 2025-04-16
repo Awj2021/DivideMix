@@ -18,10 +18,6 @@ import math
 import torch.nn.functional as F
 # from pycave.bayes import GaussianMixture
 
-# TODO: requirements for environment.
-# TODO: setting the GMM to GPU.
-# TODO: image size of dataset.
- 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
 parser.add_argument('--lr', '--learning_rate', default=0.02, type=float, help='initial learning rate')
@@ -31,7 +27,6 @@ parser.add_argument('--lambda_u', default=150, type=float, help='weight for unsu
 parser.add_argument('--p_threshold', default=0.5, type=float, help='clean probability threshold')
 parser.add_argument('--T', default=0.5, type=float, help='sharpening temperature')
 parser.add_argument('--r', default=0.5, type=float, help='noise ratio')
-parser.add_argument('--id', default='')
 parser.add_argument('--seed', default=123)
 parser.add_argument('--gpuid', default=1, type=int)
 parser.add_argument('--num_class', default=10, type=int)
@@ -78,7 +73,6 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         batch_size = inputs_x.size(0)
         
         # Transform label to one-hot
-        # FIXME: check the dimension of the labels_x.
         labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)        
         w_x = w_x.view(-1,1).type(torch.FloatTensor) 
 
@@ -157,10 +151,6 @@ def warmup(epoch,net,optimizer,dataloader):
         optimizer.zero_grad()
         outputs = net(inputs)               
         loss = CEloss(outputs, labels)      
-        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-        #     penalty = conf_penalty(outputs)
-        #     L = loss + penalty      
-        # elif args.noise_mode=='sym':   
         L = loss
         L.backward()  
         optimizer.step() 
@@ -228,14 +218,9 @@ def eval_train(model,all_loss):
     
     # fit a two-component GMM to the loss
     gmm = GaussianMixture(n_components=2,max_iter=10,tol=1e-2,reg_covar=5e-4)
-    # gmm = GaussianMixture(num_components=2, covariance_type='full').cuda()
     gmm.fit(input_loss)
     prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
-    # TODO: check the dimension of the prob.
-    # ipdb.set_trace()
-    # cluster_means = torch.mean(prob, dim=0)  # calculate the mean of the two clusters. Shape: (2,)
     prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
-    # prob = prob[:,cluster_means.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,)
     return prob,all_loss
 
 def linear_rampup(current, warm_up, rampup_length=16):
@@ -274,10 +259,6 @@ def adjust_learning_rate(args, optimizer, epoch):
     if args.cosine:
         eta_min = lr * (args.lr_decay_rate ** 3)
         lr = eta_min + (lr - eta_min) * (1 + math.cos(math.pi * epoch / args.num_epochs)) / 2
-    # else:
-    #     steps = np.sum(epoch > np.asarray(args.lr_decay_epochs))
-    #     if steps > 0:
-    #         lr = lr * (args.lr_decay_rate ** steps)
     else:
         if epoch%150==0 and epoch>0:  # put the original learning rate here. Just for 300 epochs.
             lr *= args.lr_decay_rate

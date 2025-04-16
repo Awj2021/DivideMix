@@ -6,8 +6,10 @@ from PIL import Image
 import json
 import os
 import ipdb
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-class dopanim_dataset(Dataset): 
+class twitter_dataset(Dataset): 
     def __init__(self, root, train_noise_file, transform, mode, pred=None, probability=None, paths=None, annotator=''): 
         
         self.root = root
@@ -16,28 +18,30 @@ class dopanim_dataset(Dataset):
         self.train_labels = {}
         self.test_labels = {}
 
-        train_json_file = os.path.join(self.root, train_noise_file)  # Firstly let us use the rand-3. (rand-3 / rand-4)
-        test_json_file = os.path.join(self.root, 'dopanim_test.json')
-
+        train_json_file = os.path.join(self.root, train_noise_file) 
+        test_json_file = os.path.join(self.root, 'test_LDL.json')
         if self.mode == 'test':
             with open(test_json_file, 'r') as f:
                 test_json = json.load(f)
-                for idx, entry in test_json.items():
-                    img_path = os.path.join(self.root, 'new_test', idx + '.jpeg')
-                    self.test_labels[img_path] = entry['gt_label']
+                for key, entry in test_json.items():
+                    image_name = entry['image_name']
+                    img_path = os.path.join(self.root, image_name)
+                    self.test_labels[img_path] = entry['majority_vote']
         else:
             with open(train_json_file, 'r') as f:
                 train_json = json.load(f)
-                for idx, entry in train_json.items():
-                    img_path = os.path.join(self.root, 'new_train', idx + '.jpeg')
-                    self.train_labels[img_path] = entry[annotator] # annotator could be: rand_label1, rand_label2, rand_label3, rand_label4 and mv_label
+                for key, entry in train_json.items():
+                    image_name = entry['image_name']
+                    img_path = os.path.join(self.root, image_name)
+                    self.train_labels[img_path] = entry[annotator]
 
         if mode == 'all':
             self.train_imgs=[]
             with open(train_json_file,'r') as f:
                 train_json = json.load(f)
-                for idx, entry in train_json.items():
-                    img_path = os.path.join(self.root, 'new_train', idx + '.jpeg')
+                for key, entry in train_json.items():
+                    image_name = entry['image_name']
+                    img_path = os.path.join(self.root, image_name)
                     self.train_imgs.append(img_path)
             random.shuffle(self.train_imgs)
         
@@ -47,10 +51,9 @@ class dopanim_dataset(Dataset):
             self.train_imgs = [train_imgs[i] for i in pred_idx]                
             self.probability = [probability[i] for i in pred_idx]            
             print("%s data has a size of %d"%(self.mode,len(self.train_imgs)))
-
         elif self.mode == "unlabeled":  
             train_imgs = paths 
-            pred_idx = (1-pred).nonzero()[0]  
+            pred_idx = (1-pred).nonzero()[0]    
             self.train_imgs = [train_imgs[i] for i in pred_idx]                
             self.probability = [probability[i] for i in pred_idx]            
             print("%s data has a size of %d"%(self.mode,len(self.train_imgs)))                                    
@@ -58,14 +61,10 @@ class dopanim_dataset(Dataset):
         elif mode=='test':
             self.test_imgs = []
             with open(test_json_file,'r') as f:
-                # lines = f.read().splitlines()
                 test_json = json.load(f)
-                # for entry in test_json:
-                #     img_path = os.path.join(self.root, entry['name'])
-                #     self.test_imgs.append(img_path)     
-                for idx, entry in test_json.items():
-                    img_path = os.path.join(self.root, 'new_test', idx + '.jpeg')
-                    self.test_imgs.append(img_path) 
+                for key, entry in test_json.items():
+                    img_path = os.path.join(self.root, entry['image_name'])
+                    self.test_imgs.append(img_path)
         else:
             raise ValueError("Invalid mode")
                     
@@ -103,7 +102,7 @@ class dopanim_dataset(Dataset):
         else:
             return len(self.train_imgs)            
         
-class dopanim_dataloader():  
+class twitter_dataloader():  
     def __init__(self, root, noise_file, batch_size, num_workers, annotator):    
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -128,7 +127,7 @@ class dopanim_dataloader():
                 
     def run(self,mode,pred=[],prob=[],paths=[]):        
         if mode=='warmup':
-            warmup_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_train, mode='all', annotator=self.annotator)
+            warmup_dataset = twitter_dataset(self.root, self.noise_file,transform=self.transform_train, mode='all', annotator=self.annotator)
             warmup_loader = DataLoader(
                 dataset=warmup_dataset, 
                 batch_size=self.batch_size*2,
@@ -136,21 +135,23 @@ class dopanim_dataloader():
                 num_workers=self.num_workers)  
             return warmup_loader
         elif mode=='train':
-            labeled_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_train, mode='labeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
+            labeled_dataset = twitter_dataset(self.root, self.noise_file, transform=self.transform_train, mode='labeled',pred=pred, probability=prob, paths=paths, annotator=self.annotator)
             labeled_loader = DataLoader(
                 dataset=labeled_dataset, 
                 batch_size=self.batch_size,
                 shuffle=True,
-                num_workers=self.num_workers)           
-            unlabeled_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_train, mode='unlabeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
+                num_workers=self.num_workers,
+                drop_last=True)           
+            unlabeled_dataset = twitter_dataset(self.root,self.noise_file, transform=self.transform_train, mode='unlabeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
             unlabeled_loader = DataLoader(
                 dataset=unlabeled_dataset, 
                 batch_size=int(self.batch_size),
                 shuffle=True,
-                num_workers=self.num_workers)   
+                num_workers=self.num_workers,
+                drop_last=True)   
             return labeled_loader,unlabeled_loader
         elif mode=='eval_train':
-            eval_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_test, mode='all', annotator=self.annotator)
+            eval_dataset = twitter_dataset(self.root, self.noise_file, transform=self.transform_test, mode='all', annotator=self.annotator)
             eval_loader = DataLoader(
                 dataset=eval_dataset, 
                 batch_size=self.batch_size,
@@ -158,7 +159,7 @@ class dopanim_dataloader():
                 num_workers=self.num_workers)          
             return eval_loader        
         elif mode=='test':
-            test_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_test, mode='test')
+            test_dataset = twitter_dataset(self.root,self.noise_file,transform=self.transform_test, mode='test')
             test_loader = DataLoader(
                 dataset=test_dataset, 
                 batch_size=self.batch_size,
