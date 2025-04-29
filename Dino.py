@@ -38,11 +38,27 @@ def get_dino(
     
     n_last_layer_neurons = neuron_list[-1]
 
+    # Custom BatchNorm1d that can handle batch size of 1
+    class RobustBatchNorm1d(nn.BatchNorm1d):
+        def forward(self, input):
+            # If batch size is 1, use instance normalization instead
+            if input.size(0) == 1:
+                return nn.functional.instance_norm(
+                    input, 
+                    self.running_mean, 
+                    self.running_var, 
+                    self.weight, 
+                    self.bias, 
+                    self.momentum, 
+                    self.eps
+                )
+            return super().forward(input)
+
     def get_embed_x():
         module_list = []
         for i in range(len(neuron_list) - 1):
             module_list.append(nn.Linear(neuron_list[i], neuron_list[i+1]))
-            module_list.append(nn.BatchNorm1d(num_features=neuron_list[i+1]))
+            module_list.append(RobustBatchNorm1d(num_features=neuron_list[i+1]))
             module_list.append(nn.ReLU())
             module_list.append(nn.Dropout(dropout))
         

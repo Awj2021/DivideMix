@@ -181,6 +181,23 @@ def test(net1,net2,test_loader):
     acc_w_sf = 100.*correct_w_sf/total
     test_loss /= total  # Average test loss
 
+    # Store accuracies for the last 5 epochs
+    if not hasattr(test, 'acc_history'):
+        test.acc_history = []
+        test.acc_w_sf_history = []
+    
+    test.acc_history.append(acc)
+    test.acc_w_sf_history.append(acc_w_sf)
+    
+    # Keep only the last 5 epochs
+    if len(test.acc_history) > 5:
+        test.acc_history = test.acc_history[-5:]
+        test.acc_w_sf_history = test.acc_w_sf_history[-5:]
+    
+    # Calculate average of the last 5 epochs
+    avg_acc = sum(test.acc_history) / len(test.acc_history)
+    avg_acc_w_sf = sum(test.acc_w_sf_history) / len(test.acc_w_sf_history)
+
     if acc > best_acc and epoch > args.warm_up_epochs:
         best_acc = acc
         checkpoint = os.path.join(args.project_name, running_name + '_best.pth')
@@ -196,7 +213,10 @@ def test(net1,net2,test_loader):
     print("\n| Test Acc: %.2f%%\n" %(acc))  
     print("\n| Test Acc with Softmax: %.2f%%\n" %(acc_w_sf))
     print("\n| Test Loss: %.4f\n" % (test_loss))
-    wandb.log({"test_acc_wo_sf": acc, "test_acc_w_sf": acc_w_sf, "test_loss": test_loss, "epch": epoch}) if args.wandb else None
+    print("\n| Average Test Acc (last 5 epochs): %.2f%%\n" %(avg_acc))
+    print("\n| Average Test Acc with Softmax (last 5 epochs): %.2f%%\n" %(avg_acc_w_sf))
+    wandb.log({"test_acc_wo_sf": acc, "test_acc_w_sf": acc_w_sf, "test_loss": test_loss, 
+               "avg_test_acc_wo_sf": avg_acc, "avg_test_acc_w_sf": avg_acc_w_sf, "epch": epoch}) if args.wandb else None
 
     
 def eval_train(epoch,model):

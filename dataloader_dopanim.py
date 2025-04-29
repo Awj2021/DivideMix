@@ -133,7 +133,8 @@ class dopanim_dataloader():
                 dataset=warmup_dataset, 
                 batch_size=self.batch_size*2,
                 shuffle=True,
-                num_workers=self.num_workers)  
+                num_workers=self.num_workers,
+                drop_last=True)  
             return warmup_loader
         elif mode=='train':
             labeled_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_train, mode='labeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
@@ -141,13 +142,15 @@ class dopanim_dataloader():
                 dataset=labeled_dataset, 
                 batch_size=self.batch_size,
                 shuffle=True,
-                num_workers=self.num_workers)           
+                num_workers=self.num_workers,
+                drop_last=True)           
             unlabeled_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_train, mode='unlabeled',pred=pred, probability=prob,paths=paths, annotator=self.annotator)
             unlabeled_loader = DataLoader(
                 dataset=unlabeled_dataset, 
                 batch_size=int(self.batch_size),
                 shuffle=True,
-                num_workers=self.num_workers)   
+                num_workers=self.num_workers,
+                drop_last=True)   
             return labeled_loader,unlabeled_loader
         elif mode=='eval_train':
             eval_dataset = dopanim_dataset(self.root,self.noise_file,transform=self.transform_test, mode='all', annotator=self.annotator)

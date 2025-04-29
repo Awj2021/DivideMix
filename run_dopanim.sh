@@ -1,17 +1,40 @@
 # !/bin/bash 
 
 set -e
-# cd /mnt/fast/nobackup/scratch4weeks/wa00433/projects/DivideMix
-# python=/mnt/fast/nobackup/users/wa00433/miniconda3/envs/divide1/bin/python
+python Train_dopanim.py --data_path ./dopanim --project_name divide_baseline_dopanim \
+  --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 1 \
+  --cosine --num_class 15 --lambda_u 50 --gpuid 1 --annotator mv_label --noise_file dopanim_worst-3.json --wandb
 
-# T_max=$1
-# $python Train_cifar_lr_scheduler_setting.py --data_path ./cifar-10-batches-py --project_name cifar10n_dividemix_single_annotator_rethink_setting --dataset cifar10 --gpuid 0 --batch_size 128 --lr 0.02 --T_max $T_max --wandb
-# FIXME: Cifar100n; Please Change the code of dataloader_cifar.py to load the cifar100n dataset;
-# $python Train_cifar.py --data_path ./cifar-100-python --project_name cifar100n_dividemix_baseline --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine --lambda_u 150 --noise_file CIFAR-100_human.pt --num_class 100 --wandb
+# python Train_dopanim.py --data_path ./dopanim --project_name divide_baseline_dopanim \
+#   --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 1 \
+#   --cosine --num_class 15 --lambda_u 150 --gpuid 1 --annotator mv_label --noise_file dopanim_worst-3.json --wandb
 
-# Cifar100 IDN Setting.
-# annotator=$1
-# lambda_u=$1
-# annotator=$2
-# $python Train_cifar.py --data_path ./cifar-100-python --project_name cifar100_IDN50_dividemix_cleanlab --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine --noise_file Simulated_Human.pt --num_class 100 --lambda_u $lambda_u --annotator $annotator --wandb 
-python Train_dopanim.py --data_path ./dopanim --project_name dopanim_baseline_single_label --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 5 --cosine --num_class 15 --lambda_u 0 --gpuid 1 --annotator mv_label --noise_file dopanim_worst-2.json --wandb
+# python Train_dopanim.py --data_path ./dopanim --project_name divide_baseline_dopanim \
+#   --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 1 \
+#   --cosine --num_class 15 --lambda_u 0 --gpuid 1 --annotator mv_label --noise_file dopanim_worst-3.json --wandb
+
+
+
+# python Train_dopanim.py --data_path ./dopanim --project_name divide_baseline_dopanim \
+#   --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 1 \
+#   --cosine --num_class 15 --lambda_u 50 --gpuid 1 --annotator mv_label --noise_file dopanim_worst-4.json --wandb
+
+# python Train_dopanim.py --data_path ./dopanim --project_name divide_baseline_dopanim \
+#   --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 1 \
+#   --cosine --num_class 15 --lambda_u 50 --gpuid 1 --annotator mv_label --noise_file dopanim_rand-5.json --wandb
+
+# python Train_dopanim.py --data_path ./dopanim --project_name divide_baseline_dopanim \
+#   --dataset dopanim --model dino --num_epochs 50 --batch_size 64 --lr 0.001 --warm_up_epochs 1 \
+#   --cosine --num_class 15 --lambda_u 50 --gpuid 1 --annotator mv_label --noise_file dopanim_rand-1.json --wandb
+
+
+
+
+
+
+
+
+
+
+
+
