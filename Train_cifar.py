@@ -33,7 +33,7 @@ parser.add_argument('--num_class', default=10, type=int)
 parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
-parser.add_argument('--noise_file', default='CIFAR-10_human.pt', type=str, help='name of the noise file.')
+parser.add_argument('--noise_file', default='cifar100_noisy_labels_noise_50.pt', type=str, help='name of the noise file.')
 parser.add_argument('--num_epochs', default=300, type=int)
 parser.add_argument('--warm_up_epochs', default=30, type=int, help='number of warm-up epochs.')
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
@@ -42,6 +42,8 @@ parser.add_argument('--model', default='resnet18', type=str, help='name of the m
 parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
 parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
+parser.add_argument('--calibration_file', default='cifar100_split_calibration_noise_50.pt', type=str, help='name of the calibration file.')
+parser.add_argument('--calibration_alpha', default=0.1, type=float, help='user-chosen error rate for the conformal prediction.')
 
 args = parser.parse_args()
 
@@ -52,9 +54,10 @@ torch.cuda.manual_seed_all(args.seed)
 
 if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
-
+# you should have the goal of life.
 # running name should include the dataset and the noise mode.
-running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.annotator) + '_lambda_u_' + str(args.lambda_u) 
+running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) \
+    + '_' + str(args.annotator) + '_lambda_u_' + str(args) + '_calibration_alpha_' + str(args.calibration_alpha)
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -168,18 +171,49 @@ def test(epoch,net1,net2):
     correct_after_sf = 0
     total = 0
     global best_acc, best_acc_after_sf
+
+    # Calculate calibration scores
+    q_hat1, q_hat2, q_hat_aver = calibration(net1,net2)
+    
+    # Test set predictions
+    pred_net1 = []
+    pred_net2 = []
+    pred_aver = []
+    targets_all = [target for _, target in test_loader.dataset]
+
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs1 = net1(inputs)
             outputs2 = net2(inputs)
-            outputs = outputs1+outputs2
+            pred_net1.append(torch.softmax(outputs1, dim=1))
+            pred_net2.append(torch.softmax(outputs2, dim=1))
+            pred_aver.append((torch.softmax(outputs1, dim=1) + torch.softmax(outputs2, dim=1)) / 2)
             outputs_after_sf = (torch.softmax(outputs1, dim=1) + torch.softmax(outputs2, dim=1)) / 2
-            _, predicted = torch.max(outputs, 1)            
+            _, predicted = torch.max(outputs1, 1)            
             _, predicted_after_sf = torch.max(outputs_after_sf, 1)           
             total += targets.size(0)
             correct += predicted.eq(targets).cpu().sum().item() 
             correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
+    pred_net1 = torch.cat(pred_net1, dim=0)
+    pred_net2 = torch.cat(pred_net2, dim=0)
+    pred_aver = torch.cat(pred_aver, dim=0)
+    targets_all = torch.tensor(targets_all)
+    # calculate the conformal prediction for each network
+    pred_set1 = pred_net1 >= (1 - q_hat1)
+    pred_set2 = pred_net2 >= (1 - q_hat2)
+    pred_set_aver = pred_aver >= (1 - q_hat_aver)
+
+    # calculate the empirical coverage.
+    coverage_net1 = pred_set1[np.arange(pred_set1.shape[0]), targets_all].float().mean()
+    coverage_net2 = pred_set2[np.arange(pred_set2.shape[0]), targets_all].float().mean()
+    coverage_aver = pred_set_aver[np.arange(pred_set_aver.shape[0]), targets_all].float().mean()
+
+    print(f"\nConformal Prediction Results:")
+    print(f"Network 1 - Coverage: {coverage_net1:.3f}")
+    print(f"Network 2 - Coverage: {coverage_net2:.3f}")
+    print(f"Ensemble  - Coverage: {coverage_aver:.3f}")
+
     acc = 100.*correct/total
     acc_after_sf = 100.*correct_after_sf/total
     if acc > best_acc and epoch>warm_up:
@@ -193,8 +227,52 @@ def test(epoch,net1,net2):
         best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth') 
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
-    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf, 'Best_Acc_w_sf': best_acc_after_sf}) if args.wandb else None
-    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))  
+    wandb.log({'epoch': epoch, 'Accuracy_w_sf': acc_after_sf, 'Best_Acc_w_sf': best_acc_after_sf, \
+               'coverage_net1': coverage_net1, 'coverage_net2': coverage_net2, 'coverage_aver': coverage_aver}) if args.wandb else None
+    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf)) 
+
+def calibration(net1,net2):
+    # actually, the net1 and net2 are not trained.
+    # net1.eval()
+    # net2.eval()
+    calibration_pred1 = []
+    calibration_pred2 = []
+    calibration_pred_aver = []
+    calib_n = len(calibration_loader.dataset)
+    targets_all = torch.tensor(calibration_loader.dataset.cali_label).cuda()
+    
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in enumerate(calibration_loader):
+            inputs, targets = inputs.cuda(), targets.cuda()
+            outputs1 = torch.softmax(net1(inputs), dim=1)
+            outputs2 = torch.softmax(net2(inputs), dim=1)
+            calibration_pred_aver.append((outputs1 + outputs2) / 2)
+            # calculate the calibration prediction seperately for each network
+            calibration_pred1.append(outputs1)
+            calibration_pred2.append(outputs2)
+    
+    calibration_pred1 = torch.cat(calibration_pred1, dim=0)
+    calibration_pred2 = torch.cat(calibration_pred2, dim=0)
+    calibration_pred_aver = torch.cat(calibration_pred_aver, dim=0)
+    
+    # calculate the calibration prediction seperately for each network
+    # get conformal scores for each network
+    cal_score1 = 1 - calibration_pred1[np.arange(calib_n), targets_all]
+    cal_score2 = 1 - calibration_pred2[np.arange(calib_n), targets_all]
+    cal_score_aver = 1 - calibration_pred_aver[np.arange(calib_n), targets_all]
+    
+    # Move tensors to CPU before converting to numpy
+    cal_score1 = cal_score1.cpu().numpy()
+    cal_score2 = cal_score2.cpu().numpy()
+    cal_score_aver = cal_score_aver.cpu().numpy()
+    
+    # get adjusted quantile. network1 and network2 have same number of samples.
+    q_level = np.ceil((calib_n + 1) * (1 - args.calibration_alpha)) / calib_n
+    q_hat1 = np.quantile(cal_score1, q_level, interpolation='higher')
+    q_hat2 = np.quantile(cal_score2, q_level, interpolation='higher')
+    q_hat_aver = np.quantile(cal_score_aver, q_level, interpolation='higher')
+    return q_hat1, q_hat2, q_hat_aver
+
 
 def eval_train(model,all_loss):    
     model.eval()
@@ -271,6 +349,11 @@ warm_up = args.warm_up_epochs
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
     root_dir=args.data_path,noise_file=args.noise_file, annotator=args.annotator)
 
+calibration_loader = dataloader.cifar_calibration_dataloader(args.dataset, root_dir=args.data_path, 
+                                                             mode='calibration', batch_size=args.batch_size, 
+                                                             num_workers=5, noise_file=args.calibration_file, 
+                                                             annotator=args.annotator).run()
+
 print('****** Building net ******')
 net1 = create_model()
 net2 = create_model()
@@ -320,10 +403,12 @@ for epoch in range(args.num_epochs+1):
         
         print('Train Net1')
         labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2) # co-divide
+        # for trainloaders, we do the conformal prediction. 
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
         labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
+        # for trainloaders, we do the conformal prediction, but we need to know which network is trained.
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
     # Save the model as the last one model. 
     test(epoch,net1,net2)  

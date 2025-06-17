@@ -18,6 +18,7 @@ def unpickle(file):
         dict = cPickle.load(fo, encoding='latin1')
     return dict
 
+# TODO: something was wrong here when trying to add the code of calibration.
 class cifar_dataset(Dataset): 
     def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], annotator=''): 
         self.r = r
@@ -62,7 +63,7 @@ class cifar_dataset(Dataset):
             elif dataset=='cifar100':    
                 train_dic = unpickle('%s/train'%root_dir)
                 train_data = train_dic['data']
-                train_clean_label = train_dic['fine_labels']
+                # train_clean_label = train_dic['fine_labels']
             train_data = train_data.reshape((50000, 3, 32, 32))
             train_data = train_data.transpose((0, 2, 3, 1))
 
@@ -74,6 +75,9 @@ class cifar_dataset(Dataset):
                 multi_rater = torch.load(os.path.join(root_dir, noise_file))
                 # noise_label = noise_label['noisy_label'] # just only one annotator.
                 noise_label = multi_rater[annotator]
+                train_clean_label = multi_rater['clean_label']
+                train_data = train_data[multi_rater['indices']]
+                
             
             if self.mode == 'all':
                 self.train_data = train_data
@@ -210,3 +214,65 @@ class cifar_dataloader():
                 shuffle=False,
                 num_workers=self.num_workers)          
             return eval_loader        
+
+class cifar_calibration_dataset(Dataset):
+    def __init__(self, dataset, root_dir, transform, mode, noise_file='', annotator=''):
+        self.mode = mode
+        self.transform = transform
+        self.root_dir = root_dir
+        self.noise_file = noise_file
+        self.annotator = annotator
+        
+        if self.mode == 'calibration':
+            if dataset == 'cifar100':
+                train_dic = unpickle('%s/train'%root_dir)
+                self.cali_data = train_dic['data']
+                self.cali_data = self.cali_data.reshape((50000, 3, 32, 32))
+                self.cali_data = self.cali_data.transpose((0, 2, 3, 1))
+                self.cali_label = train_dic['fine_labels']
+                self.indices = torch.load((os.path.join(root_dir, noise_file)))['indices']  
+                # Convert lists to numpy arrays before indexing
+                self.cali_data = np.array(self.cali_data)[self.indices]
+                self.cali_label = np.array(self.cali_label)[self.indices]     # here, we should use the ground-truth labels.   
+            else:
+                raise ValueError('Dataset not supported')
+        else:
+            raise ValueError('Mode not supported')
+
+    def __getitem__(self, index):
+        img, target = self.cali_data[index], self.cali_label[index]
+        img = Image.fromarray(img)
+        img = self.transform(img)
+        return img, target
+    
+    def __len__(self):
+        return len(self.cali_data)
+    
+class cifar_calibration_dataloader():
+    def __init__(self, dataset, root_dir, mode, batch_size, num_workers, noise_file='', annotator=''):
+        self.dataset = dataset
+        self.root_dir = root_dir
+        self.mode = mode
+        self.noise_file = noise_file
+        self.annotator = annotator
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.transform_test = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276)),
+                ])   
+
+    def run(self):
+        if self.mode == 'calibration':
+            if self.dataset == 'cifar100':
+                cali_dataset = cifar_calibration_dataset(dataset=self.dataset, root_dir=self.root_dir, 
+                                                         transform=self.transform_test, mode='calibration', 
+                                                         noise_file=self.noise_file, annotator=self.annotator)
+                cali_loader = DataLoader(
+                    dataset=cali_dataset, 
+                    batch_size=self.batch_size,
+                    shuffle=False,
+                    num_workers=self.num_workers)
+                return cali_loader
+        else:
+            raise ValueError('Mode not supported')
