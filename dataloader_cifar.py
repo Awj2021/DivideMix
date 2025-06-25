@@ -18,7 +18,6 @@ def unpickle(file):
         dict = cPickle.load(fo, encoding='latin1')
     return dict
 
-# TODO: something was wrong here when trying to add the code of calibration.
 class cifar_dataset(Dataset): 
     def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], annotator=''): 
         self.r = r
@@ -63,7 +62,6 @@ class cifar_dataset(Dataset):
             elif dataset=='cifar100':    
                 train_dic = unpickle('%s/train'%root_dir)
                 train_data = train_dic['data']
-                # train_clean_label = train_dic['fine_labels']
             train_data = train_data.reshape((50000, 3, 32, 32))
             train_data = train_data.transpose((0, 2, 3, 1))
 
@@ -71,39 +69,43 @@ class cifar_dataset(Dataset):
                 multi_rater = torch.load(os.path.join(root_dir, noise_file))
                 noise_label = multi_rater[annotator]
             elif dataset == 'cifar100': 
-                # FIXME:only for the cifar100n dataset. If we generate the multi-rater labels for cifar100, we need to change the code.
                 multi_rater = torch.load(os.path.join(root_dir, noise_file))
-                # noise_label = noise_label['noisy_label'] # just only one annotator.
                 noise_label = multi_rater[annotator]
-                train_clean_label = multi_rater['clean_label']
+                self.train_clean_label = multi_rater['clean_label']
                 train_data = train_data[multi_rater['indices']]
                 
             
             if self.mode == 'all':
                 self.train_data = train_data
                 self.noise_label = noise_label
+            elif self.mode == 'train_conformal':
+                self.train_data = train_data
+                # self.train_clean_label = train_clean_label
+                self.train_clean_label = multi_rater['clean_label']
             else:                   
                 if self.mode == "labeled":
                     pred_idx = pred.nonzero()[0]
-                    # pred_idx = np.where(pred)[0]
                     self.probability = [probability[i] for i in pred_idx]   
-                    
-                    clean = (np.array(noise_label)==np.array(train_clean_label))  # noisy_label includes all the labels of cifar10 or cifar100.                                                     
-                    auc_meter = AUCMeter()
-                    auc_meter.reset()
-                    auc_meter.add(probability,clean)        
-                    auc,_,_ = auc_meter.value()
-                    try:
-                        wandb.log({'Num_Labeled_Samples': pred.sum(), 'AUC': auc})
-                    except:
-                        print('wandb is not available')
                     
                 elif self.mode == "unlabeled":
                     pred_idx = (1-pred).nonzero()[0]  # why it looks like this?   
+                    pred_idx = (1-pred).nonzero()[0]  # why it looks like this?   
+                    # pred_idx = np.where(~pred)[0]                                    
+                    pred_idx = (1-pred).nonzero()[0]  # why it looks like this?                                      
                     # pred_idx = np.where(~pred)[0]                                    
                 
                 self.train_data = train_data[pred_idx]
-                self.noise_label = [noise_label[i] for i in pred_idx]                          
+                self.noise_label = [noise_label[i] for i in pred_idx]
+
+                if self.mode == 'labeled':
+                    clean_in_labeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
+                    ratio_clean_in_labeled = clean_in_labeled / len(pred_idx)
+                    print(f'clean_in_labeled: {clean_in_labeled} : {len(self.train_clean_label)}, ratio: {ratio_clean_in_labeled:.3f}')
+                elif self.mode == 'unlabeled':
+                    clean_in_unlabeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
+                    ratio_clean_in_unlabeled = clean_in_unlabeled / len(pred_idx)
+                    print(f'clean_in_unlabeled: {clean_in_unlabeled} : {len(self.train_clean_label)}, ratio: {ratio_clean_in_unlabeled:.3f}')
+                self.pred_idx = pred_idx                           
                 print("%s data has a size of %d"%(self.mode,len(self.noise_label)))            
                 
     def __getitem__(self, index):
@@ -123,7 +125,12 @@ class cifar_dataset(Dataset):
             img, target = self.train_data[index], self.noise_label[index]
             img = Image.fromarray(img)
             img = self.transform(img)            
-            return img, target, index        
+            return img, target, index    
+        elif self.mode == 'train_conformal':
+            img, target = self.train_data[index], self.train_clean_label[index]
+            img = Image.fromarray(img)
+            img = self.transform(img) # use the test transform.
+            return img, target, index
         elif self.mode=='test':
             img, target = self.test_data[index], self.test_label[index]
             img = Image.fromarray(img)
@@ -134,7 +141,7 @@ class cifar_dataset(Dataset):
         if self.mode!='test':
             return len(self.train_data)
         else:
-            return len(self.test_data)         
+            return len(self.test_data)
         
         
 class cifar_dataloader():  
@@ -195,7 +202,7 @@ class cifar_dataloader():
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers)     
-            return labeled_trainloader, unlabeled_trainloader
+            return labeled_trainloader, unlabeled_trainloader, labeled_dataset.pred_idx, unlabeled_dataset.pred_idx
         
         elif mode=='test':
             test_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='test')      
@@ -213,10 +220,19 @@ class cifar_dataloader():
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers)          
-            return eval_loader        
+            return eval_loader
+        
+        elif mode=='train_conformal':
+            train_conformal_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='train_conformal', noise_file=self.noise_file, annotator=self.annotator)      
+            train_conformal_loader = DataLoader(
+                dataset=train_conformal_dataset, 
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers)          
+            return train_conformal_loader
 
 class cifar_calibration_dataset(Dataset):
-    def __init__(self, dataset, root_dir, transform, mode, noise_file='', annotator=''):
+    def __init__(self, dataset, root_dir, transform, mode, noise_file='', annotator='', clean_or_noisy='clean'):
         self.mode = mode
         self.transform = transform
         self.root_dir = root_dir
@@ -229,11 +245,18 @@ class cifar_calibration_dataset(Dataset):
                 self.cali_data = train_dic['data']
                 self.cali_data = self.cali_data.reshape((50000, 3, 32, 32))
                 self.cali_data = self.cali_data.transpose((0, 2, 3, 1))
-                self.cali_label = train_dic['fine_labels']
+                # self.cali_label = train_dic['fine_labels']# TODO: change the label to noisy labels.
+                multi_rater = torch.load(os.path.join(root_dir, noise_file))
                 self.indices = torch.load((os.path.join(root_dir, noise_file)))['indices']  
                 # Convert lists to numpy arrays before indexing
                 self.cali_data = np.array(self.cali_data)[self.indices]
-                self.cali_label = np.array(self.cali_label)[self.indices]     # here, we should use the ground-truth labels.   
+                if clean_or_noisy == 'clean':
+                    self.cali_label = np.array(multi_rater['clean_label'])
+                elif clean_or_noisy == 'noisy':
+                    self.cali_label = np.array(multi_rater[self.annotator])
+                else:
+                    raise ValueError('Clean or noisy not supported')
+                
             else:
                 raise ValueError('Dataset not supported')
         else:
@@ -249,7 +272,7 @@ class cifar_calibration_dataset(Dataset):
         return len(self.cali_data)
     
 class cifar_calibration_dataloader():
-    def __init__(self, dataset, root_dir, mode, batch_size, num_workers, noise_file='', annotator=''):
+    def __init__(self, dataset, root_dir, mode, batch_size, num_workers, noise_file='', annotator='', clean_or_noisy=''):
         self.dataset = dataset
         self.root_dir = root_dir
         self.mode = mode
@@ -261,13 +284,14 @@ class cifar_calibration_dataloader():
                     transforms.ToTensor(),
                     transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276)),
                 ])   
+        self.clean_or_noisy = clean_or_noisy
 
     def run(self):
         if self.mode == 'calibration':
             if self.dataset == 'cifar100':
                 cali_dataset = cifar_calibration_dataset(dataset=self.dataset, root_dir=self.root_dir, 
                                                          transform=self.transform_test, mode='calibration', 
-                                                         noise_file=self.noise_file, annotator=self.annotator)
+                                                         noise_file=self.noise_file, annotator=self.annotator, clean_or_noisy=self.clean_or_noisy)
                 cali_loader = DataLoader(
                     dataset=cali_dataset, 
                     batch_size=self.batch_size,

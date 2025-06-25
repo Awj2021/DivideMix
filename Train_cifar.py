@@ -57,7 +57,7 @@ if not os.path.exists(args.data_path):
 # you should have the goal of life.
 # running name should include the dataset and the noise mode.
 running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) \
-    + '_' + str(args.annotator) + '_lambda_u_' + str(args) + '_calibration_alpha_' + str(args.calibration_alpha)
+    + '_' + str(args.annotator) + '_lambda_u_' + str(args.lambda_u) + '_calibration_alpha_' + str(args.calibration_alpha)
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -171,16 +171,13 @@ def test(epoch,net1,net2):
     correct_after_sf = 0
     total = 0
     global best_acc, best_acc_after_sf
-
-    # Calculate calibration scores
-    q_hat1, q_hat2, q_hat_aver = calibration(net1,net2)
-    
-    # Test set predictions
+    # q_hat1, q_hat2, q_hat_aver = calibration(net1,net2)
     pred_net1 = []
     pred_net2 = []
     pred_aver = []
     targets_all = [target for _, target in test_loader.dataset]
 
+    # Test dataset predictions.
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
@@ -203,33 +200,51 @@ def test(epoch,net1,net2):
     pred_set1 = pred_net1 >= (1 - q_hat1)
     pred_set2 = pred_net2 >= (1 - q_hat2)
     pred_set_aver = pred_aver >= (1 - q_hat_aver)
-
+    
+    # Calculate prediction set sizes
+    pred_set_size1 = pred_set1.sum(dim=1).float().mean()
+    pred_set_size2 = pred_set2.sum(dim=1).float().mean()
+    pred_set_size_aver = pred_set_aver.sum(dim=1).float().mean()
+    
+    print(f"\nTest Set Prediction Set Sizes:")
+    print(f"Network 1 - Avg Prediction Set Size: {pred_set_size1:.3f}")
+    print(f"Network 2 - Avg Prediction Set Size: {pred_set_size2:.3f}")
+    print(f"Ensemble  - Avg Prediction Set Size: {pred_set_size_aver:.3f}")
+    
+    # ipdb.set_trace()
     # calculate the empirical coverage.
     coverage_net1 = pred_set1[np.arange(pred_set1.shape[0]), targets_all].float().mean()
     coverage_net2 = pred_set2[np.arange(pred_set2.shape[0]), targets_all].float().mean()
     coverage_aver = pred_set_aver[np.arange(pred_set_aver.shape[0]), targets_all].float().mean()
 
-    print(f"\nConformal Prediction Results:")
+    print(f"\nTest Set Conformal Prediction Results:")
     print(f"Network 1 - Coverage: {coverage_net1:.3f}")
     print(f"Network 2 - Coverage: {coverage_net2:.3f}")
     print(f"Ensemble  - Coverage: {coverage_aver:.3f}")
 
     acc = 100.*correct/total
     acc_after_sf = 100.*correct_after_sf/total
-    if acc > best_acc and epoch>warm_up:
-        best_acc = acc
-        best_checkpoint = os.path.join(args.project_name, running_name+'_' + '_best.pth') 
-        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
-        print('\nSaving Best Model to %s \n' % best_checkpoint)
+    
+    # Save checkpoint every 5 epochs
+    if epoch % 5 == 0:
+        checkpoint = os.path.join(args.project_name, running_name + f'_epoch{epoch}.pth')
+        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, checkpoint)
+        print('\nSaving Checkpoint to %s \n' % checkpoint)
 
-    if acc_after_sf > best_acc_after_sf and epoch>warm_up:
-        best_acc_after_sf = acc_after_sf
-        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth') 
-        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, best_checkpoint)
-        print('\nSaving Best Model to %s \n' % best_checkpoint)
-    wandb.log({'epoch': epoch, 'Accuracy_w_sf': acc_after_sf, 'Best_Acc_w_sf': best_acc_after_sf, \
-               'coverage_net1': coverage_net1, 'coverage_net2': coverage_net2, 'coverage_aver': coverage_aver}) if args.wandb else None
-    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf)) 
+    
+    wandb.log({
+        'epoch': epoch, 
+        'Accuracy_w_sf': acc_after_sf, 
+        'Best_Acc_w_sf': best_acc_after_sf,
+        'test_coverage_net1': coverage_net1, 
+        'test_coverage_net2': coverage_net2, 
+        'test_coverage_aver': coverage_aver,
+        'test_pred_set_size_net1': pred_set_size1,
+        'test_pred_set_size_net2': pred_set_size2,
+        'test_pred_set_size_aver': pred_set_size_aver,
+    }) if args.wandb else None
+    
+    print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))
 
 def calibration(net1,net2):
     # actually, the net1 and net2 are not trained.
@@ -276,7 +291,7 @@ def calibration(net1,net2):
 
 def eval_train(model,all_loss):    
     model.eval()
-    losses = torch.zeros(50000)    
+    losses = torch.zeros(len(eval_loader.dataset))    
     with torch.no_grad():
         for batch_idx, (inputs, targets, index) in enumerate(eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda() 
@@ -344,6 +359,66 @@ def adjust_learning_rate(args, optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
+def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unlabeled_pred_idx, epoch, net_name):
+    """
+    Perform conformal prediction analysis on labeled and unlabeled data
+    
+    Args:
+        net: The neural network to evaluate
+        data_loader: DataLoader for all data, including the labeled and unlabeled data.
+        q_hat: Quantile threshold for conformal prediction
+        labeled_pred_idx: Indices of labeled predictions
+        unlabeled_pred_idx: Indices of unlabeled predictions
+        epoch: Current epoch number
+        net_name: Name of the network (e.g., 'net1' or 'net2')
+    """
+    net.eval() 
+
+    pred_all = []
+    targets_all = []
+    
+    with torch.no_grad():
+        for batch_idx, (inputs, targets, _) in enumerate(data_loader):
+            inputs, targets = inputs.cuda(), targets.cuda()
+            outputs = net(inputs)
+            pred_all.append(torch.softmax(outputs, dim=1))
+            targets_all.extend(targets.cpu().numpy())
+    
+    pred_all = torch.cat(pred_all, dim=0)
+    targets_all = torch.tensor(targets_all)
+    
+    # Calculate conformal prediction sets for all data
+    pred_set = pred_all >= (1 - q_hat)
+
+    # split the pred_set into labeled and unlabeled
+    labeled_pred_set = pred_set[labeled_pred_idx]
+    
+
+    unlabeled_pred_set = pred_set[unlabeled_pred_idx]
+
+    # calculate the prediction set sizes for labeled and unlabeled data
+    labeled_pred_set_size = labeled_pred_set.sum(dim=1).float().mean()
+    unlabeled_pred_set_size = unlabeled_pred_set.sum(dim=1).float().mean()
+
+    # calculate the coverage for labeled and unlabeled data
+    labeled_coverage = labeled_pred_set[np.arange(labeled_pred_set.shape[0]), targets_all[labeled_pred_idx]].float().mean()
+    unlabeled_coverage = unlabeled_pred_set[np.arange(unlabeled_pred_set.shape[0]), targets_all[unlabeled_pred_idx]].float().mean()
+
+    print(f"\n{net_name} Prediction Set Sizes:")
+    print(f"Labeled Prediction Set Size: {labeled_pred_set_size:.3f}")
+    print(f"Unlabeled Prediction Set Size: {unlabeled_pred_set_size:.3f}")
+    print(f"Labeled Coverage: {labeled_coverage:.3f}")
+    print(f"Unlabeled Coverage: {unlabeled_coverage:.3f}")
+
+    wandb.log({
+        'epoch': epoch,
+        f'{net_name}_labeled_pred_set_size': labeled_pred_set_size,
+        f'{net_name}_unlabeled_pred_set_size': unlabeled_pred_set_size,
+        f'{net_name}_labeled_coverage': labeled_coverage,
+        f'{net_name}_unlabeled_coverage': unlabeled_coverage
+    }) if args.wandb else None
+
+
 warm_up = args.warm_up_epochs
 
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
@@ -353,6 +428,9 @@ calibration_loader = dataloader.cifar_calibration_dataloader(args.dataset, root_
                                                              mode='calibration', batch_size=args.batch_size, 
                                                              num_workers=5, noise_file=args.calibration_file, 
                                                              annotator=args.annotator).run()
+test_loader = loader.run('test')
+eval_loader = loader.run('eval_train')
+
 
 print('****** Building net ******')
 net1 = create_model()
@@ -360,8 +438,20 @@ net2 = create_model()
 cudnn.benchmark = True
 
 criterion = SemiLoss()
+
+warmup_checkpoint = os.path.join(args.project_name, running_name + f'_epoch{warm_up - 1}_warmup.pth')
 optimizer1 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
+optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)#
+
+start_epoch = 0
+if os.path.exists(warmup_checkpoint):
+    print(f'Loading warmup model from {warmup_checkpoint}')
+    checkpoint = torch.load(warmup_checkpoint)
+    net1.load_state_dict(checkpoint['net1'])
+    net2.load_state_dict(checkpoint['net2'])
+    optimizer1.load_state_dict(checkpoint['optimizer1'])
+    optimizer2.load_state_dict(checkpoint['optimizer2'])
+    start_epoch = checkpoint['epoch'] + 1
 
 CE = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
@@ -374,27 +464,30 @@ if not os.path.exists(args.project_name):
 
 all_loss = [[],[]] # save the history of losses from two networks
 
-for epoch in range(args.num_epochs+1):   
-    # lr=args.lr
-    # if epoch % 150 == 0 and epoch>0:
-    #     lr /= 10
+for epoch in range(start_epoch, args.num_epochs+1):   
     adjust_learning_rate(args, optimizer1, epoch)
-    adjust_learning_rate(args, optimizer2, epoch)      
-    # for param_group in optimizer1.param_groups: # adjust learning rate when epoch >= 150.
-    #     param_group['lr'] = lr       
-    # for param_group in optimizer2.param_groups:
-    #     param_group['lr'] = lr          
-    test_loader = loader.run('test')
-    eval_loader = loader.run('eval_train')   
+    adjust_learning_rate(args, optimizer2, epoch)        
+
+    q_hat1, q_hat2, q_hat_aver = calibration(net1, net2)
     
     if epoch<warm_up:       
         warmup_trainloader = loader.run('warmup')
         print('Warmup Net1')
         warmup(epoch,net1,optimizer1,warmup_trainloader)    
         print('\nWarmup Net2')
-        warmup(epoch,net2,optimizer2,warmup_trainloader) 
-   
+        warmup(epoch,net2,optimizer2,warmup_trainloader)
+        if epoch == warm_up - 1:
+            torch.save({
+                'epoch': epoch,
+                'net1': net1.state_dict(),
+                'net2': net2.state_dict(),
+                'optimizer1': optimizer1.state_dict(),
+                'optimizer2': optimizer2.state_dict()
+            }, warmup_checkpoint)
+            print('\nSaving Warmup Model to %s \n' % warmup_checkpoint)
+
     else:         
+        train_conformal_loader = loader.run('train_conformal')
         prob1,all_loss[0]=eval_train(net1,all_loss[0])   # The probability is calculated when evaluating. 
         prob2,all_loss[1]=eval_train(net2,all_loss[1])   # Use the all train_data and the noisy labels.        
                
@@ -402,16 +495,21 @@ for epoch in range(args.num_epochs+1):
         pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred2,prob2) # co-divide
-        # for trainloaders, we do the conformal prediction. 
+        labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred2,prob2) # co-divide
+        conformal_prediction_analysis(net2, train_conformal_loader, q_hat2, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net2')
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader = loader.run('train',pred1,prob1) # co-divide
-        # for trainloaders, we do the conformal prediction, but we need to know which network is trained.
-        train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader) # train net2         
-    # Save the model as the last one model. 
-    test(epoch,net1,net2)  
+        labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred1,prob1)
+        conformal_prediction_analysis(net1, train_conformal_loader, q_hat1, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net1')    
+        train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader)
+    
+    # Calculate calibration predictions every 10 epochs
+    if epoch % 5 == 0:
+        print(f"\nCalculating calibration predictions at epoch {epoch}")
+        test(epoch, net1, net2)
+    
+    # Save the model as the last one model
     if epoch == args.num_epochs:
         last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
