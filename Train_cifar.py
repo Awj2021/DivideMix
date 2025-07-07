@@ -48,8 +48,7 @@ parser.add_argument('--calibration_alpha', default=0.1, type=float, help='user-c
 parser.add_argument('--mixmatch', action='store_true', default=False, help='use mixmatch.')
 parser.add_argument('--conformal_prediction', action='store_true', default=False, help='use conformal prediction.')
 parser.add_argument('--cp_weight', default=0.5, type=float, help='hyperparameter for the conformal prediction.')
-parser.add_argument('--cp_loss', default='kl', type=str, choices=['kl', 'mse'], help='loss function for the conformal prediction.')
-
+parser.add_argument('--cp_loss', default='kl', type=str, choices=['ce', 'mse', 'kl'], help='loss function for the conformal prediction.')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -94,17 +93,29 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
             outputs_u21 = net2(inputs_u)
             outputs_u22 = net2(inputs_u2) 
                        
-            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1)) / 4       
-
-            if args.conformal_prediction:
-                # TODO: here, replace the sharpening with the KL.
+            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) + torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1)) / 4   
+            
+            # when we use the Conformal Prediction, temparature sharpening is operated before the conformal prediction.
+            # baseline method:
+            if not args.conformal_prediction:
+                ptu = pu**(1/args.T) # temparature sharpening 
+            
+            # method 1: q_b = (1 - cp_weight) * pred + cp_weight * average(pred). Temperature sharpening is operated after the conformal prediction.
+            if args.conformal_prediction and args.cp_loss == 'mse':
                 pu_pred_set = pu >= (1 - q_hat) # here, we use the average of the two networks.
                 mask = pu_pred_set.float()
                 mask_sum = mask.sum(dim=1, keepdim=True)
                 aver_pu = mask / mask_sum # average the soft softmax outputs.
                 ptu = (1 - args.cp_weight) * pu + args.cp_weight * aver_pu
+                ptu = ptu**(1/args.T) 
+
+            # method 2: use the CE loss function for the unlabeled data. Temperature sharpening is not used.
+            if args.conformal_prediction and args.cp_loss == 'ce':
+                pu_pred_set = pu >= (1 - q_hat) # here, we use the average of the two networks.
+                mask = pu_pred_set.float()
+                mask_sum = mask.sum(dim=1, keepdim=True)
+                ptu = mask / mask_sum # average the soft softmax outputs. 
                 
-            ptu = pu**(1/args.T) # sharpening.
             targets_u = ptu / ptu.sum(dim=1, keepdim=True) # normalize
             targets_u = targets_u.detach()       # shape: (batch_size, num_class)
             
@@ -149,19 +160,28 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
 
             loss = Lx + lamb * Lu  + penalty
         else:
-            labeled_all_inputs = torch.cat([inputs_x, inputs_x2], dim=0)
-            labeled_all_targets = torch.cat([targets_x, targets_x], dim=0)
-            unlabeled_all_inputs = torch.cat([inputs_u, inputs_u2], dim=0)
-            unlabeled_all_targets = torch.cat([targets_u, targets_u], dim=0)
-            Lx, Lu, lamb = criterion(labeled_all_inputs, labeled_all_targets, unlabeled_all_inputs, unlabeled_all_targets, epoch+batch_idx/num_iter, warm_up)
-
+            # We don't use the mixmatch here.
+            # Without mixmatch - direct training on labeled and unlabeled data
+            inputs_all_x = torch.cat([inputs_x, inputs_x2], dim=0)
+            inputs_all_u = torch.cat([inputs_u, inputs_u2], dim=0)
+            outputs_x = net(inputs_all_x)
+            outputs_u = net(inputs_all_u)
+            targets_x = torch.cat([targets_x, targets_x], dim=0)
+            targets_u = torch.cat([targets_u, targets_u], dim=0)
+            Lx, Lu, lamb = criterion(outputs_x, targets_x, outputs_u, targets_u, epoch+batch_idx/num_iter, warm_up)
+            
+            # TODO: fix the code below before this weekend.
+            # labeled_all_inputs = torch.cat([inputs_x, inputs_x2], dim=0)
+            # labeled_all_targets = torch.cat([targets_x, targets_x], dim=0)
+            # unlabeled_all_inputs = torch.cat([inputs_u, inputs_u2], dim=0)
+            # unlabeled_all_targets = torch.cat([targets_u, targets_u], dim=0)
             # regularization
             prior = torch.ones(args.num_class)/args.num_class
             prior = prior.cuda()        
-            pred_mean = torch.softmax(logits, dim=1).mean(0)
+            pred_mean = torch.softmax(torch.cat([outputs_x, outputs_u], dim=0), dim=1).mean(0)
             penalty = torch.sum(prior*torch.log(prior/pred_mean))
 
-            loss = Lx + lamb * Lu  + penalty
+            loss = Lx + lamb * Lu + penalty
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -355,18 +375,18 @@ class SemiLoss(object):
 
         Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
         # ipdb.set_trace()
-        Lu = torch.mean((probs_u - targets_u)**2) # TODO: here, replace the mean square loss with with the KL divergence loss.
+        Lu = torch.mean((probs_u - targets_u)**2) 
 
         return Lx, Lu, linear_rampup(epoch,warm_up)
 
-class SemiLoss_CP(object):
+class SemiLoss_CE(object):
     """
-    Loss function for the conformal prediction with the KL divergence loss for the unlabeled data.
+    Loss function for the conformal prediction with the Cross Entropy loss for the unlabeled data.
     """
     def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, warm_up):
         probs_u = torch.softmax(outputs_u, dim=1)
         Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
-        Lu = 1/2 * (torch.mean(torch.sum(probs_u * torch.log(probs_u / targets_u), dim=1)) + torch.mean(torch.sum(targets_u * torch.log(targets_u / probs_u), dim=1)))
+        Lu = -torch.mean(torch.sum(F.log_softmax(outputs_u, dim=1) * targets_u, dim=1))
         # Lu = torch.mean((probs_u - targets_u)**2) # TODO: here, replace the mean square loss with with the KL divergence loss.
         return Lx, Lu, linear_rampup(epoch,warm_up)
 
@@ -477,8 +497,8 @@ net1 = create_model()
 net2 = create_model()
 cudnn.benchmark = True
 
-if args.cp_loss == 'kl':
-    criterion = SemiLoss_CP()
+if args.cp_loss == 'ce': # using the Cross Entropy loss for the unlabeled data.
+    criterion = SemiLoss_CE()
 elif args.cp_loss == 'mse':
     criterion = SemiLoss()
 else:
@@ -542,12 +562,12 @@ for epoch in range(start_epoch, args.num_epochs+1):
         
         print('Train Net1')
         labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred2,prob2) # co-divide
-        # conformal_prediction_analysis(net2, train_conformal_loader, q_hat2, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net2')
+        conformal_prediction_analysis(net2, train_conformal_loader, q_hat2, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net2')
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader, q_hat2) # train net1  
         
         print('\nTrain Net2')
         labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred1,prob1)
-        # conformal_prediction_analysis(net1, train_conformal_loader, q_hat1, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net1')    
+        conformal_prediction_analysis(net1, train_conformal_loader, q_hat1, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net1')    
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader, q_hat1)
     
     # Calculate calibration predictions every 10 epochs
