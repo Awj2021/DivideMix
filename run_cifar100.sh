@@ -8,7 +8,7 @@ set -e
 #   --mixmatch --cp_loss mse --wandb
 
 # method 1: 
-calibration_alphas=(0.1 0.3)
+calibration_alphas=(0.3)
 cp_weights=(0.5 0.7 0.9)
 for calibration_alpha in ${calibration_alphas[@]}; do
   for cp_weight in ${cp_weights[@]}; do

@@ -16,6 +16,8 @@ import wandb
 import ipdb
 import math
 import torch.nn.functional as F
+from torchmetrics.classification import MulticlassCalibrationError
+
 # from pycave.bayes import GaussianMixture
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
@@ -245,7 +247,7 @@ def test(epoch,net1,net2):
     pred_net1 = torch.cat(pred_net1, dim=0)
     pred_net2 = torch.cat(pred_net2, dim=0)
     pred_aver = torch.cat(pred_aver, dim=0)
-    targets_all = torch.tensor(targets_all)
+    targets_all = torch.tensor(targets_all).cuda()  # Move to CUDA
     # calculate the conformal prediction for each network
     pred_set1 = pred_net1 >= (1 - q_hat1)
     pred_set2 = pred_net2 >= (1 - q_hat2)
@@ -273,7 +275,30 @@ def test(epoch,net1,net2):
 
     acc = 100.*correct/total
     acc_after_sf = 100.*correct_after_sf/total
-    
+
+    # calculating the calibration error here.
+    calibration_error_net1_l2 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l2')
+    calibration_error_net2_l2 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l2')
+
+    calibration_error_net1_l1 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l1')
+    calibration_error_net2_l1 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l1')
+
+    calibration_error_net1_max = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='max')
+    calibration_error_net2_max = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='max')
+
+    calibration_net1_value = calibration_error_net1_l2(pred_net1, targets_all)
+    calibration_net2_value = calibration_error_net2_l2(pred_net2, targets_all)
+    calibration_net1_value_l1 = calibration_error_net1_l1(pred_net1, targets_all)
+    calibration_net2_value_l1 = calibration_error_net2_l1(pred_net2, targets_all)
+    calibration_net1_value_max = calibration_error_net1_max(pred_net1, targets_all)
+    calibration_net2_value_max = calibration_error_net2_max(pred_net2, targets_all)
+
+    print(f"Network 1 - Calibration Error (L2): {calibration_net1_value:.3f}")
+    print(f"Network 2 - Calibration Error (L2): {calibration_net2_value:.3f}")
+    print(f"Network 1 - Calibration Error (L1): {calibration_net1_value_l1:.3f}")
+    print(f"Network 2 - Calibration Error (L1): {calibration_net2_value_l1:.3f}")
+    print(f"Network 1 - Calibration Error (Max): {calibration_net1_value_max:.3f}")
+    print(f"Network 2 - Calibration Error (Max): {calibration_net2_value_max:.3f}")
     # Save checkpoint every 5 epochs
     if epoch % 5 == 0:
         checkpoint = os.path.join(args.project_name, running_name + f'_epoch{epoch}.pth')
@@ -284,13 +309,19 @@ def test(epoch,net1,net2):
     wandb.log({
         'epoch': epoch, 
         'Accuracy_w_sf': acc_after_sf, 
-        'Best_Acc_w_sf': best_acc_after_sf,
+        # 'Best_Acc_w_sf': best_acc_after_sf,
         'test_coverage_net1': coverage_net1, 
         'test_coverage_net2': coverage_net2, 
         'test_coverage_aver': coverage_aver,
         'test_pred_set_size_net1': pred_set_size1,
         'test_pred_set_size_net2': pred_set_size2,
         'test_pred_set_size_aver': pred_set_size_aver,
+        'test_calibration_error_net1_l2': calibration_net1_value,
+        'test_calibration_error_net2_l2': calibration_net2_value,
+        'test_calibration_error_net1_l1': calibration_net1_value_l1,
+        'test_calibration_error_net2_l1': calibration_net2_value_l1,
+        'test_calibration_error_net1_max': calibration_net1_value_max,
+        'test_calibration_error_net2_max': calibration_net2_value_max,
     }) if args.wandb else None
     
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))
@@ -453,8 +484,6 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
 
     # split the pred_set into labeled and unlabeled
     labeled_pred_set = pred_set[labeled_pred_idx]
-    
-
     unlabeled_pred_set = pred_set[unlabeled_pred_idx]
 
     # calculate the prediction set sizes for labeled and unlabeled data
@@ -464,18 +493,56 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
     labeled_coverage = labeled_pred_set[np.arange(labeled_pred_set.shape[0]), targets_all[labeled_pred_idx]].float().mean()
     unlabeled_coverage = unlabeled_pred_set[np.arange(unlabeled_pred_set.shape[0]), targets_all[unlabeled_pred_idx]].float().mean()
 
+    # Calculate calibration error for labeled and unlabeled data
+    labeled_pred = pred_all[labeled_pred_idx]
+    unlabeled_pred = pred_all[unlabeled_pred_idx]
+    labeled_targets = targets_all[labeled_pred_idx].cuda()  # Move to CUDA
+    unlabeled_targets = targets_all[unlabeled_pred_idx].cuda()  # Move to CUDA
+    
+    # Initialize calibration error metrics
+    labeled_calibration_error_l2 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l2')
+    unlabeled_calibration_error_l2 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l2')
+
+    labeled_calibration_error_l1 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l1')
+    unlabeled_calibration_error_l1 = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='l1')
+
+    labeled_calibration_error_max = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='max')
+    unlabeled_calibration_error_max = MulticlassCalibrationError(num_classes=args.num_class, num_bins=20, norm='max')
+    
+    # Add predictions to calibration error metrics
+    labeled_calibration_error_l2_value = labeled_calibration_error_l2(labeled_pred, labeled_targets)
+    unlabeled_calibration_error_l2_value = unlabeled_calibration_error_l2(unlabeled_pred, unlabeled_targets)
+
+    labeled_calibration_error_l1_value = labeled_calibration_error_l1(labeled_pred, labeled_targets)
+    unlabeled_calibration_error_l1_value = unlabeled_calibration_error_l1(unlabeled_pred, unlabeled_targets)
+
+    labeled_calibration_error_max_value = labeled_calibration_error_max(labeled_pred, labeled_targets)
+    unlabeled_calibration_error_max_value = unlabeled_calibration_error_max(unlabeled_pred, unlabeled_targets)
+ 
     print(f"\n{net_name} Prediction Set Sizes:")
     print(f"Labeled Prediction Set Size: {labeled_pred_set_size:.3f}")
     print(f"Unlabeled Prediction Set Size: {unlabeled_pred_set_size:.3f}")
     print(f"Labeled Coverage: {labeled_coverage:.3f}")
     print(f"Unlabeled Coverage: {unlabeled_coverage:.3f}")
+    print(f"Labeled Calibration Error (L2): {labeled_calibration_error_l2_value:.3f}")
+    print(f"Unlabeled Calibration Error (L2): {unlabeled_calibration_error_l2_value:.3f}")
+    print(f"Labeled Calibration Error (L1): {labeled_calibration_error_l1_value:.3f}")
+    print(f"Unlabeled Calibration Error (L1): {unlabeled_calibration_error_l1_value:.3f}")
+    print(f"Labeled Calibration Error (Max): {labeled_calibration_error_max_value:.3f}")
+    print(f"Unlabeled Calibration Error (Max): {unlabeled_calibration_error_max_value:.3f}")
 
     wandb.log({
         'epoch': epoch,
         f'{net_name}_labeled_pred_set_size': labeled_pred_set_size,
         f'{net_name}_unlabeled_pred_set_size': unlabeled_pred_set_size,
         f'{net_name}_labeled_coverage': labeled_coverage,
-        f'{net_name}_unlabeled_coverage': unlabeled_coverage
+        f'{net_name}_unlabeled_coverage': unlabeled_coverage,
+        f'{net_name}_labeled_calibration_error_l2': labeled_calibration_error_l2_value,
+        f'{net_name}_unlabeled_calibration_error_l2': unlabeled_calibration_error_l2_value,
+        f'{net_name}_labeled_calibration_error_l1': labeled_calibration_error_l1_value,
+        f'{net_name}_unlabeled_calibration_error_l1': unlabeled_calibration_error_l1_value,
+        f'{net_name}_labeled_calibration_error_max': labeled_calibration_error_max_value,
+        f'{net_name}_unlabeled_calibration_error_max': unlabeled_calibration_error_max_value,
     }) if args.wandb else None
 
 
@@ -506,7 +573,7 @@ else:
 
 warmup_checkpoint = os.path.join(args.project_name, f'{args.dataset}_{args.annotator}_{warm_up - 1}_warmup.pth')
 optimizer1 = optim.SGD(net1.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)#
+optimizer2 = optim.SGD(net2.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
 start_epoch = 0
 if os.path.exists(warmup_checkpoint):
@@ -534,7 +601,6 @@ for epoch in range(start_epoch, args.num_epochs+1):
     adjust_learning_rate(args, optimizer2, epoch)        
 
     q_hat1, q_hat2, q_hat_aver = calibration(net1, net2)
-    # ipdb.set_trace()
     
     if epoch<warm_up:       
         warmup_trainloader = loader.run('warmup')

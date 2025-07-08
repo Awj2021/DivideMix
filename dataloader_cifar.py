@@ -82,6 +82,16 @@ class cifar_dataset(Dataset):
                 self.train_data = train_data
                 # self.train_clean_label = train_clean_label
                 self.train_clean_label = multi_rater['clean_label']
+            elif self.mode == 'train_conformal_labeled':
+                pred_idx = pred.nonzero()[0]
+                self.train_data = train_data[pred_idx]
+                self.train_clean_label = [multi_rater['clean_label'][i] for i in pred_idx]
+                self.pred_idx = pred_idx
+            elif self.mode == 'train_conformal_unlabeled':
+                pred_idx = (1-pred).nonzero()[0]
+                self.train_data = train_data[pred_idx]
+                self.train_clean_label = [multi_rater['clean_label'][i] for i in pred_idx]
+                self.pred_idx = pred_idx
             else:                   
                 if self.mode == "labeled":
                     pred_idx = pred.nonzero()[0]
@@ -127,6 +137,16 @@ class cifar_dataset(Dataset):
             img = self.transform(img)            
             return img, target, index    
         elif self.mode == 'train_conformal':
+            img, target = self.train_data[index], self.train_clean_label[index]
+            img = Image.fromarray(img)
+            img = self.transform(img) # use the test transform.
+            return img, target, index
+        elif self.mode == 'train_conformal_labeled':
+            img, target = self.train_data[index], self.train_clean_label[index]
+            img = Image.fromarray(img)
+            img = self.transform(img) # use the test transform.
+            return img, target, index
+        elif self.mode == 'train_conformal_unlabeled':
             img, target = self.train_data[index], self.train_clean_label[index]
             img = Image.fromarray(img)
             img = self.transform(img) # use the test transform.
@@ -230,6 +250,23 @@ class cifar_dataloader():
                 shuffle=False,
                 num_workers=self.num_workers)          
             return train_conformal_loader
+
+        elif mode=='train_conformal_labeled':
+            train_conformal_labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='train_conformal_labeled', noise_file=self.noise_file, pred=pred, annotator=self.annotator)      
+            train_conformal_labeled_loader = DataLoader(
+                dataset=train_conformal_labeled_dataset, 
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers)          
+            return train_conformal_labeled_loader
+        elif mode=='train_conformal_unlabeled':
+            train_conformal_unlabeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_test, mode='train_conformal_unlabeled', noise_file=self.noise_file, pred=pred, annotator=self.annotator)      
+            train_conformal_unlabeled_loader = DataLoader(
+                dataset=train_conformal_unlabeled_dataset, 
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers)          
+            return train_conformal_unlabeled_loader
 
 class cifar_calibration_dataset(Dataset):
     def __init__(self, dataset, root_dir, transform, mode, noise_file='', annotator='', clean_or_noisy='clean'):
