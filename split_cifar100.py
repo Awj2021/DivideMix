@@ -44,7 +44,7 @@ def split_cifar100(data_path, label_file, split_ratio=0.8, seed=42):
     train_original_labels = train_dict['fine_labels']
     
     # Load all annotator labels from the .pt file
-    multi_rater = torch.load(label_file)
+    multi_rater = torch.load(os.path.join(data_path, label_file))   
     print(f"Available annotators in label file: {list(multi_rater.keys())}")
     
     # Create indices for all samples
@@ -67,14 +67,14 @@ def split_cifar100(data_path, label_file, split_ratio=0.8, seed=42):
     calibration_labels['indices'] = calibration_indices
 
     # Save the split data
-    output_dir = os.path.dirname(label_file)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    # output_dir = os.path.dirname(label_file)
+    # if not os.path.exists(output_dir):
+    #     os.makedirs(output_dir)
 
     # ipdb.set_trace()
     
-    train_file = os.path.join(output_dir, 'cifar100_split_train_noise_50.pt')
-    calibration_file = os.path.join(output_dir, 'cifar100_split_calibration_noise_50.pt')
+    train_file = os.path.join(args.data_path, 'cifar100_split_train_noise_70.pt')
+    calibration_file = os.path.join(args.data_path, 'cifar100_split_calibration_noise_70.pt')
     
     torch.save(train_labels, train_file)
     torch.save(calibration_labels, calibration_file)
@@ -86,8 +86,6 @@ if __name__ == "__main__":
                         help='Path to the CIFAR-100 data directory')
     parser.add_argument('--label_file', type=str, required=True,
                         help='Path to the .pt file containing annotator labels')
-    parser.add_argument('--output_dir', type=str, default='./cifar100_split',
-                        help='Directory to save the split data')
     parser.add_argument('--split_ratio', type=float, default=0.8,
                         help='Ratio of data to use for training (default: 0.9)')
     parser.add_argument('--seed', type=int, default=42,
@@ -96,5 +94,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     split_cifar100(args.data_path, args.label_file, args.split_ratio, args.seed)
-    print(f"Data split completed. Train and calibration sets saved to {args.output_dir}.")
+    print(f"Data split completed. Train and calibration sets saved to {args.data_path}.")
     

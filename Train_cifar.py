@@ -51,6 +51,7 @@ parser.add_argument('--mixmatch', action='store_true', default=False, help='use 
 parser.add_argument('--conformal_prediction', action='store_true', default=False, help='use conformal prediction.')
 parser.add_argument('--cp_weight', default=0.5, type=float, help='hyperparameter for the conformal prediction.')
 parser.add_argument('--cp_loss', default='kl', type=str, choices=['ce', 'mse', 'kl'], help='loss function for the conformal prediction.')
+parser.add_argument('--clean_or_noisy', default='clean', type=str, choices=['clean', 'noisy'], help='clean or noisy calibration sets.')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -62,7 +63,7 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 # you should have the goal of life.
 # running name should include the dataset and the noise mode.
-running_name = 'calibration_alpha_' + str(args.calibration_alpha) + '_cp_weight_' + str(args.cp_weight) + '_cp_loss_' + args.cp_loss
+running_name = 'alpha_' + str(args.calibration_alpha) + '_cp_w_' + str(args.cp_weight) + '_loss_' + args.cp_loss
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
@@ -101,24 +102,30 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
             # baseline method:
             if not args.conformal_prediction:
                 ptu = pu**(1/args.T) # temparature sharpening 
+                ptu = torch.clamp(ptu, min=1e-8, max=1.0)
             
             # method 1: q_b = (1 - cp_weight) * pred + cp_weight * average(pred). Temperature sharpening is operated after the conformal prediction.
             if args.conformal_prediction and args.cp_loss == 'mse':
                 pu_pred_set = pu >= (1 - q_hat) # here, we use the average of the two networks.
                 mask = pu_pred_set.float()
                 mask_sum = mask.sum(dim=1, keepdim=True)
+                mask_sum = torch.clamp(mask_sum, min=1e-8)  # Prevent division by zero
                 aver_pu = mask / mask_sum # average the soft softmax outputs.
                 ptu = (1 - args.cp_weight) * pu + args.cp_weight * aver_pu
-                ptu = ptu**(1/args.T) 
+                ptu = ptu**(1/args.T)
+                ptu = torch.clamp(ptu, min=1e-8, max=1.0)
 
             # method 2: use the CE loss function for the unlabeled data. Temperature sharpening is not used.
             if args.conformal_prediction and args.cp_loss == 'ce':
                 pu_pred_set = pu >= (1 - q_hat) # here, we use the average of the two networks.
                 mask = pu_pred_set.float()
                 mask_sum = mask.sum(dim=1, keepdim=True)
+                mask_sum = torch.clamp(mask_sum, min=1e-8)  # Prevent division by zero
                 ptu = mask / mask_sum # average the soft softmax outputs. 
                 
-            targets_u = ptu / ptu.sum(dim=1, keepdim=True) # normalize
+            ptu_sum = ptu.sum(dim=1, keepdim=True)
+            ptu_sum = torch.clamp(ptu_sum, min=1e-8)  # Prevent division by zero
+            targets_u = ptu / ptu_sum # normalize
             targets_u = targets_u.detach()       # shape: (batch_size, num_class)
             
             # label refinement of labeled samples
@@ -128,8 +135,11 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
             px = (torch.softmax(outputs_x, dim=1) + torch.softmax(outputs_x2, dim=1)) / 2
             px = w_x*labels_x + (1-w_x)*px              
             ptx = px**(1/args.T) # temparature sharpening 
-                       
-            targets_x = ptx / ptx.sum(dim=1, keepdim=True) # normalize           
+            ptx = torch.clamp(ptx, min=1e-8, max=1.0)
+            
+            ptx_sum = ptx.sum(dim=1, keepdim=True)
+            ptx_sum = torch.clamp(ptx_sum, min=1e-8)  # Prevent division by zero
+            targets_x = ptx / ptx_sum # normalize           
             targets_x = targets_x.detach()       
         
         if args.mixmatch:
@@ -300,7 +310,7 @@ def test(epoch,net1,net2):
     print(f"Network 1 - Calibration Error (Max): {calibration_net1_value_max:.3f}")
     print(f"Network 2 - Calibration Error (Max): {calibration_net2_value_max:.3f}")
     # Save checkpoint every 5 epochs
-    if epoch % 5 == 0:
+    if epoch % 5 == 0 and epoch > 200:
         checkpoint = os.path.join(args.project_name, running_name + f'_epoch{epoch}.pth')
         torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, checkpoint)
         print('\nSaving Checkpoint to %s \n' % checkpoint)
@@ -554,7 +564,7 @@ loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noi
 calibration_loader = dataloader.cifar_calibration_dataloader(args.dataset, root_dir=args.data_path, 
                                                              mode='calibration', batch_size=args.batch_size, 
                                                              num_workers=5, noise_file=args.calibration_file, 
-                                                             annotator=args.annotator, clean_or_noisy='noisy').run()
+                                                             annotator=args.annotator, clean_or_noisy=args.clean_or_noisy).run()
 test_loader = loader.run('test')
 eval_loader = loader.run('eval_train')
 
