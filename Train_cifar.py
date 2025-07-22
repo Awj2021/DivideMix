@@ -111,7 +111,6 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
                 mask_sum = mask.sum(dim=1, keepdim=True)
                 mask_sum = torch.clamp(mask_sum, min=1e-8)  # Prevent division by zero
                 aver_pu = mask / mask_sum # average the soft softmax outputs.
-                ptu = (1 - args.cp_weight) * pu + args.cp_weight * aver_pu
                 ptu = ptu**(1/args.T)
                 ptu = torch.clamp(ptu, min=1e-8, max=1.0)
 
@@ -318,20 +317,20 @@ def test(epoch,net1,net2):
     
     wandb.log({
         'epoch': epoch, 
-        'Accuracy_w_sf': acc_after_sf, 
+        'accuracy/Accuracy_w_sf': acc_after_sf, 
         # 'Best_Acc_w_sf': best_acc_after_sf,
-        'test_coverage_net1': coverage_net1, 
-        'test_coverage_net2': coverage_net2, 
-        'test_coverage_aver': coverage_aver,
-        'test_pred_set_size_net1': pred_set_size1,
-        'test_pred_set_size_net2': pred_set_size2,
-        'test_pred_set_size_aver': pred_set_size_aver,
-        'test_calibration_error_net1_l2': calibration_net1_value,
-        'test_calibration_error_net2_l2': calibration_net2_value,
-        'test_calibration_error_net1_l1': calibration_net1_value_l1,
-        'test_calibration_error_net2_l1': calibration_net2_value_l1,
-        'test_calibration_error_net1_max': calibration_net1_value_max,
-        'test_calibration_error_net2_max': calibration_net2_value_max,
+        'cp/test_coverage_net1': coverage_net1, 
+        'cp/test_coverage_net2': coverage_net2, 
+        'cp/test_coverage_aver': coverage_aver,
+        'cp/test_pred_set_size_net1': pred_set_size1,
+        'cp/test_pred_set_size_net2': pred_set_size2,
+        'cp/test_pred_set_size_aver': pred_set_size_aver,
+        'calibration/test_calibration_error_net1_l2': calibration_net1_value,
+        'calibration/test_calibration_error_net2_l2': calibration_net2_value,
+        'calibration/test_calibration_error_net1_l1': calibration_net1_value_l1,
+        'calibration/test_calibration_error_net2_l1': calibration_net2_value_l1,
+        'calibration/test_calibration_error_net1_max': calibration_net1_value_max,
+        'calibration/test_calibration_error_net2_max': calibration_net2_value_max,
     }) if args.wandb else None
     
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))
@@ -487,7 +486,7 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
             targets_all.extend(targets.cpu().numpy())
     
     pred_all = torch.cat(pred_all, dim=0)
-    targets_all = torch.tensor(targets_all)
+    targets_all = torch.tensor(targets_all) # targets is the ground truth labels.
     
     # Calculate conformal prediction sets for all data
     pred_set = pred_all >= (1 - q_hat)
@@ -543,16 +542,16 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
 
     wandb.log({
         'epoch': epoch,
-        f'{net_name}_labeled_pred_set_size': labeled_pred_set_size,
-        f'{net_name}_unlabeled_pred_set_size': unlabeled_pred_set_size,
-        f'{net_name}_labeled_coverage': labeled_coverage,
-        f'{net_name}_unlabeled_coverage': unlabeled_coverage,
-        f'{net_name}_labeled_calibration_error_l2': labeled_calibration_error_l2_value,
-        f'{net_name}_unlabeled_calibration_error_l2': unlabeled_calibration_error_l2_value,
-        f'{net_name}_labeled_calibration_error_l1': labeled_calibration_error_l1_value,
-        f'{net_name}_unlabeled_calibration_error_l1': unlabeled_calibration_error_l1_value,
-        f'{net_name}_labeled_calibration_error_max': labeled_calibration_error_max_value,
-        f'{net_name}_unlabeled_calibration_error_max': unlabeled_calibration_error_max_value,
+        f'cp/{net_name}_labeled_pred_set_size': labeled_pred_set_size,
+        f'cp/{net_name}_unlabeled_pred_set_size': unlabeled_pred_set_size,
+        f'cp/{net_name}_labeled_coverage': labeled_coverage,
+        f'cp/{net_name}_unlabeled_coverage': unlabeled_coverage,
+        f'calibration/{net_name}_labeled_calibration_error_l2': labeled_calibration_error_l2_value,
+        f'calibration/{net_name}_unlabeled_calibration_error_l2': unlabeled_calibration_error_l2_value,
+        f'calibration/{net_name}_labeled_calibration_error_l1': labeled_calibration_error_l1_value,
+        f'calibration/{net_name}_unlabeled_calibration_error_l1': unlabeled_calibration_error_l1_value,
+        f'calibration/{net_name}_labeled_calibration_error_max': labeled_calibration_error_max_value,
+        f'calibration/{net_name}_unlabeled_calibration_error_max': unlabeled_calibration_error_max_value,
     }) if args.wandb else None
 
 
