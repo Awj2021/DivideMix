@@ -83,8 +83,12 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
             inputs_u, inputs_u2 = unlabeled_train_iter.next()          # Get two different unlabeled samples.But from the dataloader, the images are the same.       
         batch_size = inputs_x.size(0)
         
-        # Transform label to one-hot
-        labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)        
+        # labels_x is already in soft-label format (probability distribution), no need to convert to one-hot
+        # Ensure labels_x has the correct shape for soft labels
+        if labels_x.dim() == 1:
+            # If labels_x is 1D (hard labels), convert to one-hot
+            labels_x = torch.zeros(batch_size, args.num_class).scatter_(1, labels_x.view(-1,1), 1)
+        # If labels_x is already 2D (soft labels), keep as is
         w_x = w_x.view(-1,1).type(torch.FloatTensor) 
 
         inputs_x, inputs_x2, labels_x, w_x = inputs_x.cuda(), inputs_x2.cuda(), labels_x.cuda(), w_x.cuda()
@@ -377,17 +381,34 @@ def calibration(net1,net2):
     q_hat_aver = np.quantile(cal_score_aver, q_level, method='higher')
     return q_hat1, q_hat2, q_hat_aver
 
+def annealing_weight(epoch, start_epoch = 120, end_epoch = 300):
+    if epoch < start_epoch:
+        return 0
+    elif epoch >= start_epoch and epoch < end_epoch:
+        return (epoch - start_epoch) / (end_epoch - start_epoch)
+    else:
+        return 1
 
-def eval_train(model,all_loss):    
+def eval_train(epoch, model,soft_labels, all_loss):    
     model.eval()
-    losses = torch.zeros(len(eval_loader.dataset))    
+    w = annealing_weight(epoch)
+    losses = torch.zeros(len(eval_loader.dataset))
+    targets_all = []
     with torch.no_grad():
         for batch_idx, (inputs, targets, index) in enumerate(eval_loader):
-            inputs, targets = inputs.cuda(), targets.cuda() 
+            inputs = inputs.cuda()
+            soft_labels_batch = soft_labels[index]
+            # Convert targets to one-hot encoding for CIFAR100
+            targets_one_hot = torch.zeros(targets.size(0), args.num_class).scatter_(1, targets.view(-1, 1), 1)
+            targets_batch = targets_one_hot * w + soft_labels_batch * (1 - w)
+            targets_all.append(targets_batch)
+            targets_batch = targets_batch.cuda()
             outputs = model(inputs) 
-            loss = CE(outputs, targets)  
+            # ipdb.set_trace()
+            loss = nn.KLDivLoss(reduction='none')(F.log_softmax(outputs, dim=1), targets_batch)
+            loss_per_sample = loss.sum(dim=1)
             for b in range(inputs.size(0)):
-                losses[index[b]]=loss[b]  # save the loss for each sample.        
+                losses[index[b]]=loss_per_sample[b]  # save the loss for each sample.        
     losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
     all_loss.append(losses)
     # ema
@@ -403,7 +424,8 @@ def eval_train(model,all_loss):
     gmm.fit(input_loss)
     prob = gmm.predict_proba(input_loss)  # cluster the loss into two classes: noisy and clean. Shape: (50000,2)
     prob = prob[:,gmm.means_.argmin()]    # choose the cluster with lower mean as the clean sample. Shape: (50000,) 
-    return prob,all_loss
+    targets_all = torch.cat(targets_all, dim=0)
+    return prob, all_loss, targets_all
 
 def linear_rampup(current, warm_up, rampup_length=16):
     current = np.clip((current-warm_up) / rampup_length, 0.0, 1.0)
@@ -555,6 +577,22 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
     }) if args.wandb else None
 
 
+def generate_soft_label(model, dataloader, q_hat):
+    model.eval()
+    soft_labels = []
+    with torch.no_grad():
+        for batch_idx, (inputs, _, _) in enumerate(dataloader):
+            inputs = inputs.cuda()
+            outputs = model(inputs)
+            probs = torch.softmax(outputs, dim=1)
+            # Conformal prediction: mask and renormalize
+            mask = (probs >= (1 - q_hat)).float()
+            mask_sum = mask.sum(dim=1, keepdim=True).clamp(min=1e-8)  # TODO: here, we set the soft labels as the average of the two networks.
+            soft = mask / mask_sum
+            soft_labels.append(soft.cpu())
+    soft_labels = torch.cat(soft_labels, dim=0)
+    return soft_labels
+
 warm_up = args.warm_up_epochs
 
 loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, batch_size=args.batch_size,num_workers=5,\
@@ -564,9 +602,6 @@ calibration_loader = dataloader.cifar_calibration_dataloader(args.dataset, root_
                                                              mode='calibration', batch_size=args.batch_size, 
                                                              num_workers=5, noise_file=args.calibration_file, 
                                                              annotator=args.annotator, clean_or_noisy=args.clean_or_noisy).run()
-test_loader = loader.run('test')
-eval_loader = loader.run('eval_train')
-
 
 print('****** Building net ******')
 net1 = create_model()
@@ -603,7 +638,11 @@ best_acc_after_sf = 0
 if not os.path.exists(args.project_name):
     os.makedirs(args.project_name)
 
-all_loss = [[],[]] # save the history of losses from two networks
+all_loss = [[],[]] # save the history of losses from two networks#
+
+test_loader = loader.run('test')
+eval_loader = loader.run('eval_train')
+train_conformal_loader = loader.run('train_conformal')
 
 for epoch in range(start_epoch, args.num_epochs+1):   
     adjust_learning_rate(args, optimizer1, epoch)
@@ -627,21 +666,32 @@ for epoch in range(start_epoch, args.num_epochs+1):
             }, warmup_checkpoint)
             print('\nSaving Warmup Model to %s \n' % warmup_checkpoint)
 
-    else:         
-        train_conformal_loader = loader.run('train_conformal')
-        prob1,all_loss[0]=eval_train(net1,all_loss[0])   # The probability is calculated when evaluating. 
-        prob2,all_loss[1]=eval_train(net2,all_loss[1])   # Use the all train_data and the noisy labels.        
+    else:
+        # Before the training, replace the labels of all datasets. 
+        # For the training datasets, we replace all the labels with the average predictions of conformal prediction sets.
+        soft_labels_net1 = generate_soft_label(net1, eval_loader, q_hat1) # net1 
+        soft_labels_net2 = generate_soft_label(net2, eval_loader, q_hat2)
+        # I think we should seperate the soft labels into two parts: the net1 and net2.
+        
+        # ipdb.set_trace()
+        loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noise_mode, 
+                                             batch_size=args.batch_size,num_workers=5,
+                                             root_dir=args.data_path,noise_file=args.noise_file, 
+                                             annotator=args.annotator)
+
+        prob1,all_loss[0], targets_all1=eval_train(epoch, net1, soft_labels_net1, all_loss[0])   # The probability is calculated when evaluating. 
+        prob2,all_loss[1], targets_all2=eval_train(epoch, net2, soft_labels_net2, all_loss[1])   # Use the all train_data and the noisy labels.        
                
         pred1 = (prob1 > args.p_threshold)      # The threshold is set to 0.5 except for the CIFAR-10 dataset r = 0.9.
         pred2 = (prob2 > args.p_threshold)      # The list of pred only contains the True or False.
         
         print('Train Net1')
-        labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred2,prob2) # co-divide
+        labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred2,prob2, targets_all2) # co-divide
         conformal_prediction_analysis(net2, train_conformal_loader, q_hat2, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net2')
         train(epoch,net1,net2,optimizer1,labeled_trainloader, unlabeled_trainloader, q_hat2) # train net1  
         
         print('\nTrain Net2')
-        labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred1,prob1)
+        labeled_trainloader, unlabeled_trainloader, labeled_pred_idx, unlabeled_pred_idx = loader.run('train',pred1,prob1, targets_all1)
         conformal_prediction_analysis(net1, train_conformal_loader, q_hat1, labeled_pred_idx, unlabeled_pred_idx, epoch, 'net1')    
         train(epoch,net2,net1,optimizer2,labeled_trainloader, unlabeled_trainloader, q_hat1)
     

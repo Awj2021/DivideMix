@@ -19,10 +19,11 @@ def unpickle(file):
     return dict
 
 class cifar_dataset(Dataset): 
-    def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], annotator=''): 
+    def __init__(self, dataset, r, noise_mode, root_dir, transform, mode, noise_file='', pred=[], probability=[], annotator='', soft_labels=None): 
         self.r = r
         self.mode = mode
         self.transform = transform  
+        self.soft_labels = soft_labels
         # add the code for downloading the dataset.
         if not os.path.exists(root_dir):
             os.makedirs(root_dir)
@@ -65,6 +66,7 @@ class cifar_dataset(Dataset):
             train_data = train_data.reshape((50000, 3, 32, 32))
             train_data = train_data.transpose((0, 2, 3, 1))
 
+
             if dataset == 'cifar10': 
                 multi_rater = torch.load(os.path.join(root_dir, noise_file))
                 noise_label = multi_rater[annotator]
@@ -95,10 +97,22 @@ class cifar_dataset(Dataset):
                     # pred_idx = np.where(~pred)[0]                                    
                 
                 self.train_data = train_data[pred_idx]
-                self.noise_label = [noise_label[i] for i in pred_idx]
+                if self.soft_labels is not None:
+                    self.noise_label = [self.soft_labels[i] for i in pred_idx]
+                else:
+                    self.noise_label = [noise_label[i] for i in pred_idx]
 
                 if self.mode == 'labeled':
-                    clean_in_labeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
+                    if self.soft_labels is not None:
+                        # For soft labels, we can't directly compare with clean labels
+                        # Instead, we can check if the predicted class (argmax) matches the clean label
+                        noise_label_array = np.array(self.noise_label)
+                        predicted_classes = np.argmax(noise_label_array, axis=1)
+                        clean_labels_array = np.array([self.train_clean_label[i] for i in pred_idx])
+                        clean_in_labeled = np.sum(predicted_classes == clean_labels_array)
+                    else:
+                        # For hard labels, direct comparison
+                        clean_in_labeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
                     ratio_clean_in_labeled = clean_in_labeled / len(pred_idx)
                     print(f'clean_in_labeled: {clean_in_labeled} : {len(self.train_clean_label)}, ratio: {ratio_clean_in_labeled:.3f}')
                     if wandb.run is not None:
@@ -108,7 +122,16 @@ class cifar_dataset(Dataset):
                             "labeled/ratio_clean_in_labeled": ratio_clean_in_labeled
                         })
                 elif self.mode == 'unlabeled':
-                    clean_in_unlabeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
+                    if self.soft_labels is not None:
+                        # For soft labels, we can't directly compare with clean labels
+                        # Instead, we can check if the predicted class (argmax) matches the clean label
+                        noise_label_array = np.array(self.noise_label)
+                        predicted_classes = np.argmax(noise_label_array, axis=1)
+                        clean_labels_array = np.array([self.train_clean_label[i] for i in pred_idx])
+                        clean_in_unlabeled = np.sum(predicted_classes == clean_labels_array)
+                    else:
+                        # For hard labels, direct comparison
+                        clean_in_unlabeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
                     ratio_clean_in_unlabeled = clean_in_unlabeled / len(pred_idx)
                     print(f'clean_in_unlabeled: {clean_in_unlabeled} : {len(self.train_clean_label)}, ratio: {ratio_clean_in_unlabeled:.3f}')
                     if wandb.run is not None:
@@ -135,6 +158,8 @@ class cifar_dataset(Dataset):
             return img1, img2
         elif self.mode=='all':
             img, target = self.train_data[index], self.noise_label[index]
+            if self.soft_labels is not None:
+                target = self.soft_labels[index]
             img = Image.fromarray(img)
             img = self.transform(img)            
             return img, target, index    
@@ -190,7 +215,7 @@ class cifar_dataloader():
                     transforms.ToTensor(),
                     transforms.Normalize((0.507, 0.487, 0.441), (0.267, 0.256, 0.276)),
                 ])   
-    def run(self,mode,pred=[],prob=[]):
+    def run(self,mode,pred=[],prob=[], soft_labels=None):
         if mode=='warmup':
             all_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="all",noise_file=self.noise_file, annotator=self.annotator)                
             trainloader = DataLoader(
@@ -201,14 +226,14 @@ class cifar_dataloader():
             return trainloader
                                      
         elif mode=='train':
-            labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="labeled", noise_file=self.noise_file, pred=pred, probability=prob, annotator=self.annotator)              
+            labeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="labeled", noise_file=self.noise_file, pred=pred, probability=prob, annotator=self.annotator, soft_labels=soft_labels)              
             labeled_trainloader = DataLoader(
                 dataset=labeled_dataset, 
                 batch_size=self.batch_size,
                 shuffle=True,
                 num_workers=self.num_workers)   
             
-            unlabeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="unlabeled", noise_file=self.noise_file, pred=pred, annotator=self.annotator)                    
+            unlabeled_dataset = cifar_dataset(dataset=self.dataset, noise_mode=self.noise_mode, r=self.r, root_dir=self.root_dir, transform=self.transform_train, mode="unlabeled", noise_file=self.noise_file, pred=pred, annotator=self.annotator, soft_labels=soft_labels)                    
             unlabeled_trainloader = DataLoader(
                 dataset=unlabeled_dataset, 
                 batch_size=self.batch_size,
