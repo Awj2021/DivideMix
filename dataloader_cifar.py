@@ -115,12 +115,12 @@ class cifar_dataset(Dataset):
                         clean_in_labeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
                     ratio_clean_in_labeled = clean_in_labeled / len(pred_idx)
                     print(f'clean_in_labeled: {clean_in_labeled} : {len(self.train_clean_label)}, ratio: {ratio_clean_in_labeled:.3f}')
-                    if wandb.run is not None:
-                        wandb.log({
-                            "labeled/clean_in_labeled": clean_in_labeled,
-                            "labeled/total_in_labeled": len(pred_idx),
-                            "labeled/ratio_clean_in_labeled": ratio_clean_in_labeled
-                        })
+                    # if wandb.run is not None:
+                    #     wandb.log({
+                    #         "labeled/clean_in_labeled": clean_in_labeled,
+                    #         "labeled/total_in_labeled": len(pred_idx),
+                    #         "labeled/ratio_clean_in_labeled": ratio_clean_in_labeled
+                    #     })
                 elif self.mode == 'unlabeled':
                     if self.soft_labels is not None:
                         # For soft labels, we can't directly compare with clean labels
@@ -134,12 +134,12 @@ class cifar_dataset(Dataset):
                         clean_in_unlabeled = np.sum(np.array(self.noise_label) == np.array([self.train_clean_label[i] for i in pred_idx]))
                     ratio_clean_in_unlabeled = clean_in_unlabeled / len(pred_idx)
                     print(f'clean_in_unlabeled: {clean_in_unlabeled} : {len(self.train_clean_label)}, ratio: {ratio_clean_in_unlabeled:.3f}')
-                    if wandb.run is not None:
-                        wandb.log({
-                            "unlabeled/clean_in_unlabeled": clean_in_unlabeled,
-                            "unlabeled/total_in_unlabeled": len(pred_idx),
-                            "unlabeled/ratio_clean_in_unlabeled": ratio_clean_in_unlabeled
-                        })
+                    # if wandb.run is not None:
+                        # wandb.log({
+                        #     "unlabeled/clean_in_unlabeled": clean_in_unlabeled,
+                        #     "unlabeled/total_in_unlabeled": len(pred_idx),
+                        #     "unlabeled/ratio_clean_in_unlabeled": ratio_clean_in_unlabeled
+                        # })
                 self.pred_idx = pred_idx                           
                 print("%s data has a size of %d"%(self.mode,len(self.noise_label)))            
                 

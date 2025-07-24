@@ -17,8 +17,8 @@ import ipdb
 import math
 import torch.nn.functional as F
 from torchmetrics.classification import MulticlassCalibrationError
+from torchmetrics import MeanMetric
 
-# from pycave.bayes import GaussianMixture
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
 parser.add_argument('--batch_size', default=128, type=int, help='train batchsize') 
@@ -52,6 +52,9 @@ parser.add_argument('--conformal_prediction', action='store_true', default=False
 parser.add_argument('--cp_weight', default=0.5, type=float, help='hyperparameter for the conformal prediction.')
 parser.add_argument('--cp_loss', default='kl', type=str, choices=['ce', 'mse', 'kl'], help='loss function for the conformal prediction.')
 parser.add_argument('--clean_or_noisy', default='clean', type=str, choices=['clean', 'noisy'], help='clean or noisy calibration sets.')
+parser.add_argument('--resume_checkpoint', default=None, type=str, help='name of the checkpoint to resume training.')
+parser.add_argument('--annealing_start_epoch', default=120, type=int, help='epoch to start annealing the weight.')
+parser.add_argument('--annealing_end_epoch', default=300, type=int, help='epoch to end annealing the weight.')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -63,14 +66,20 @@ if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
 # you should have the goal of life.
 # running name should include the dataset and the noise mode.
-running_name = 'alpha_' + str(args.calibration_alpha) + '_cp_w_' + str(args.cp_weight) + '_loss_' + args.cp_loss
-wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
+wandb.init(project=args.project_name, config=args) if args.wandb else None
 
 # Training
 def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_hat):
     net.train()
     net2.eval() #fix one network and train the other
-      
+    
+    # Torchmetrics mean metrics for loss tracking
+    mean_Lx = MeanMetric().cuda()
+    mean_Lu = MeanMetric().cuda()
+    mean_loss = MeanMetric().cuda()
+    mean_penalty = MeanMetric().cuda()
+    mean_lamb = MeanMetric().cuda()
+    
     unlabeled_train_iter = iter(unlabeled_trainloader)   
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
     # the unlabeled_trainloader maybe has the different size with the labeled_trainloader.
@@ -203,11 +212,29 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
         loss.backward()
         optimizer.step()
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item(), 'lamb': lamb}) if args.wandb else None
+        # Update torchmetrics mean metrics
+        mean_Lx.update(Lx.detach())
+        mean_Lu.update(Lu.detach())
+        mean_loss.update(loss.detach())
+        mean_penalty.update(penalty.detach())
+        mean_lamb.update(torch.tensor(lamb, device=loss.device))
+
         sys.stdout.write('\r')
         sys.stdout.write('%s:  Epoch [%3d/%3d] Iter[%3d/%3d]\t Labeled loss: %.5f  Unlabeled loss: %.5f  lambda: %.5f'
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, Lx.item(), Lu.item(), lamb)) 
         sys.stdout.flush()
+
+    # Log to wandb only at the end of the epoch
+    wandb.log({
+        'epoch': epoch,
+        'train/num_iter': num_iter,
+        'train/Labeled_loss': mean_Lx.compute().item(),
+        'train/Unlabeled_loss': mean_Lu.compute().item(),
+        'train/loss': mean_loss.compute().item(),
+        'train/penalty': mean_penalty.compute().item(),
+        'train/lamb': mean_lamb.compute().item(),
+        'train/mixmatch': args.mixmatch
+    }, step=epoch) if args.wandb else None
 
 def warmup(epoch,net,optimizer,dataloader):
     net.train()
@@ -221,7 +248,7 @@ def warmup(epoch,net,optimizer,dataloader):
         L.backward()  
         optimizer.step() 
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}) if args.wandb else None
+        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'CE_loss': loss.item()}, step=epoch) if args.wandb else None
         sys.stdout.write('\r')
         sys.stdout.write('%s: | Epoch [%3d/%3d] Iter[%3d/%3d]\t CE-loss: %.4f'
                 %(args.dataset, epoch, args.num_epochs, batch_idx+1, num_iter, loss.item()))
@@ -312,13 +339,7 @@ def test(epoch,net1,net2):
     print(f"Network 2 - Calibration Error (L1): {calibration_net2_value_l1:.3f}")
     print(f"Network 1 - Calibration Error (Max): {calibration_net1_value_max:.3f}")
     print(f"Network 2 - Calibration Error (Max): {calibration_net2_value_max:.3f}")
-    # Save checkpoint every 5 epochs
-    if epoch % 5 == 0 and epoch > 200:
-        checkpoint = os.path.join(args.project_name, running_name + f'_epoch{epoch}.pth')
-        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, checkpoint)
-        print('\nSaving Checkpoint to %s \n' % checkpoint)
 
-    
     wandb.log({
         'epoch': epoch, 
         'accuracy/Accuracy_w_sf': acc_after_sf, 
@@ -335,7 +356,7 @@ def test(epoch,net1,net2):
         'calibration/test_calibration_error_net2_l1': calibration_net2_value_l1,
         'calibration/test_calibration_error_net1_max': calibration_net1_value_max,
         'calibration/test_calibration_error_net2_max': calibration_net2_value_max,
-    }) if args.wandb else None
+    }, step=epoch) if args.wandb else None
     
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %(epoch,acc,acc_after_sf))
 
@@ -391,7 +412,7 @@ def annealing_weight(epoch, start_epoch = 120, end_epoch = 300):
 
 def eval_train(epoch, model,soft_labels, all_loss):    
     model.eval()
-    w = annealing_weight(epoch)
+    w = annealing_weight(epoch, args.annealing_start_epoch, args.annealing_end_epoch)
     losses = torch.zeros(len(eval_loader.dataset))
     targets_all = []
     with torch.no_grad():
@@ -410,6 +431,12 @@ def eval_train(epoch, model,soft_labels, all_loss):
             for b in range(inputs.size(0)):
                 losses[index[b]]=loss_per_sample[b]  # save the loss for each sample.        
     losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
+    
+    wandb.log({
+        'epoch': epoch,
+        'train/w': w
+    }, step=epoch) if args.wandb else None
+    
     all_loss.append(losses)
     # ema
     if args.r==0.9: # average loss over last 5 epochs to improve convergence stability
@@ -574,7 +601,7 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
         f'calibration/{net_name}_unlabeled_calibration_error_l1': unlabeled_calibration_error_l1_value,
         f'calibration/{net_name}_labeled_calibration_error_max': labeled_calibration_error_max_value,
         f'calibration/{net_name}_unlabeled_calibration_error_max': unlabeled_calibration_error_max_value,
-    }) if args.wandb else None
+    }, step=epoch) if args.wandb else None
 
 
 def generate_soft_label(model, dataloader, q_hat):
@@ -623,6 +650,18 @@ start_epoch = 0
 if os.path.exists(warmup_checkpoint):
     print(f'Loading warmup model from {warmup_checkpoint}')
     checkpoint = torch.load(warmup_checkpoint)
+    net1.load_state_dict(checkpoint['net1'])
+    net2.load_state_dict(checkpoint['net2'])
+    optimizer1.load_state_dict(checkpoint['optimizer1'])
+    optimizer2.load_state_dict(checkpoint['optimizer2'])
+    start_epoch = checkpoint['epoch'] + 1
+
+# checkpoint = os.path.join(args.project_name, args.resume_checkpoint)
+if args.resume_checkpoint is not None:
+    checkpoint = os.path.join(args.project_name, args.resume_checkpoint)
+    print(f'Loading checkpoint from {checkpoint}')
+    checkpoint = torch.load(checkpoint)
+    start_epoch = checkpoint['epoch'] + 1
     net1.load_state_dict(checkpoint['net1'])
     net2.load_state_dict(checkpoint['net2'])
     optimizer1.load_state_dict(checkpoint['optimizer1'])
@@ -700,10 +739,22 @@ for epoch in range(start_epoch, args.num_epochs+1):
         print(f"\nCalculating calibration predictions at epoch {epoch}")
         test(epoch, net1, net2)
     
-    # Save the model as the last one model
-    if epoch == args.num_epochs:
-        last_checkpoint = os.path.join(args.project_name, running_name+'_' + str(epoch) + '_last.pth')
-        torch.save({'net1': net1.state_dict(), 'net2': net2.state_dict()}, last_checkpoint)
-        print('\nSaving Last Model to %s \n' % last_checkpoint)
+    if epoch > warm_up and epoch % 10 == 0:
+        # Use wandb run name if wandb is enabled, else fallback to args.project_name
+        if args.wandb and wandb.run is not None:
+            checkpoint_dir = os.path.join(args.project_name, wandb.run.name)
+        
+        if not os.path.exists(checkpoint_dir):
+            os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint = os.path.join(checkpoint_dir, f'epoch_{epoch}.pth')
+        # Try to save optimizer states if available
+        torch.save({'net1': net1.state_dict(), 
+                    'net2': net2.state_dict(),
+                    'optimizer1': optimizer1.state_dict(),
+                    'optimizer2': optimizer2.state_dict(),
+                    'epoch': epoch}, checkpoint)
+        
+        print(f'\nSaving Checkpoint to {checkpoint}\n')
+    
 
 
