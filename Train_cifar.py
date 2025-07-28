@@ -148,7 +148,7 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
             px = w_x*labels_x + (1-w_x)*px              
             ptx = px**(1/args.T) # temparature sharpening 
             ptx = torch.clamp(ptx, min=1e-8, max=1.0)
-            
+                                                                                                                                                                                                                                                                                                      
             ptx_sum = ptx.sum(dim=1, keepdim=True)
             ptx_sum = torch.clamp(ptx_sum, min=1e-8)  # Prevent division by zero
             targets_x = ptx / ptx_sum # normalize           
@@ -404,11 +404,11 @@ def calibration(net1,net2):
 
 def annealing_weight(epoch, start_epoch = 120, end_epoch = 300):
     if epoch < start_epoch:
-        return 0
-    elif epoch >= start_epoch and epoch < end_epoch:
-        return (epoch - start_epoch) / (end_epoch - start_epoch)
-    else:
         return 1
+    elif epoch >= start_epoch and epoch < end_epoch:
+        return 1 - (epoch - start_epoch) / (end_epoch - start_epoch)
+    else:
+        return 0
 
 def eval_train(epoch, model,soft_labels, all_loss):    
     model.eval()
@@ -421,7 +421,7 @@ def eval_train(epoch, model,soft_labels, all_loss):
             soft_labels_batch = soft_labels[index]
             # Convert targets to one-hot encoding for CIFAR100
             targets_one_hot = torch.zeros(targets.size(0), args.num_class).scatter_(1, targets.view(-1, 1), 1)
-            targets_batch = targets_one_hot * w + soft_labels_batch * (1 - w)
+            targets_batch = targets_one_hot * (1 - w) + soft_labels_batch * w
             targets_all.append(targets_batch)
             targets_batch = targets_batch.cuda()
             outputs = model(inputs) 
@@ -429,7 +429,10 @@ def eval_train(epoch, model,soft_labels, all_loss):
             loss = nn.KLDivLoss(reduction='none')(F.log_softmax(outputs, dim=1), targets_batch)
             loss_per_sample = loss.sum(dim=1)
             for b in range(inputs.size(0)):
-                losses[index[b]]=loss_per_sample[b]  # save the loss for each sample.        
+                losses[index[b]]=loss_per_sample[b]  # save the loss for each sample.    
+            # loss = CE(outputs, targets_batch)
+            # for b in range(inputs.size(0)):
+            #     losses[index[b]]=loss[b]  # save the loss for each sample.     
     losses = (losses-losses.min())/(losses.max()-losses.min())    # normalize the loss
     
     wandb.log({

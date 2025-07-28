@@ -73,8 +73,8 @@ def split_cifar100(data_path, label_file, split_ratio=0.8, seed=42):
 
     # ipdb.set_trace()
     
-    train_file = os.path.join(args.data_path, 'cifar100_split_train_noise_70.pt')
-    calibration_file = os.path.join(args.data_path, 'cifar100_split_calibration_noise_70.pt')
+    train_file = os.path.join(args.data_path, 'cifar100_split_train_noise_50_0.95.pt')
+    calibration_file = os.path.join(args.data_path, 'cifar100_split_calibration_noise_50_0.95.pt')
     
     torch.save(train_labels, train_file)
     torch.save(calibration_labels, calibration_file)
@@ -86,7 +86,7 @@ if __name__ == "__main__":
                         help='Path to the CIFAR-100 data directory')
     parser.add_argument('--label_file', type=str, required=True,
                         help='Path to the .pt file containing annotator labels')
-    parser.add_argument('--split_ratio', type=float, default=0.8,
+    parser.add_argument('--split_ratio', type=float, default=0.95,
                         help='Ratio of data to use for training (default: 0.9)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')

@@ -21,16 +21,19 @@ set -e
 # done
 
 # Method 2: after 200 epochs, add the average of the two networks.
-calibration_alphas=(0.3)
+calibration_alphas=(0.1 0.3)
 cp_weights=(0)
+noise_file=cifar100_split_train_noise_50.pt
+calibration_file=cifar100_split_calibration_noise_50.pt
+
 for calibration_alpha in ${calibration_alphas[@]}; do
   for cp_weight in ${cp_weights[@]}; do
-    python Train_cifar.py --data_path ./cifar-100-python --project_name Relabeling_DivideMix \
+    python Train_cifar.py --data_path ./cifar-100-python --project_name Relabeling_DivideMix_0.95 \
       --dataset cifar100 --gpuid 0 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine \
-      --noise_file cifar100_split_train_noise_50.pt --num_class 100 --lambda_u 50 --annotator random_label1 \
-      --calibration_alpha $calibration_alpha --mixmatch --cp_weight $cp_weight \
-      --cp_loss mse --T 0.5 --clean_or_noisy clean \
-      --annealing_start_epoch 80 --annealing_end_epoch 200 --wandb # clean for the calibration sets.
+      --noise_file $noise_file --num_class 100 --lambda_u 50 --annotator random_label1 \
+      --calibration_file $calibration_file --calibration_alpha $calibration_alpha --mixmatch --cp_weight $cp_weight \
+      --cp_loss mse --T 0.5 --clean_or_noisy noisy \
+      --annealing_start_epoch 120 --annealing_end_epoch 300 --wandb # clean for the calibration sets.
       # resume_checkpoint:
   done
 done
