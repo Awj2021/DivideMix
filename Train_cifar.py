@@ -145,7 +145,10 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, q_
             outputs_x2 = net(inputs_x2)            
             
             px = (torch.softmax(outputs_x, dim=1) + torch.softmax(outputs_x2, dim=1)) / 2
-            px = w_x*labels_x + (1-w_x)*px              
+            px = w_x*labels_x + (1-w_x)*px     
+
+            # no temperature sharpening.
+            # ptx = px
             ptx = px**(1/args.T) # temparature sharpening 
             ptx = torch.clamp(ptx, min=1e-8, max=1.0)
                                                                                                                                                                                                                                                                                                       
@@ -410,9 +413,32 @@ def annealing_weight(epoch, start_epoch = 120, end_epoch = 300):
     else:
         return 0
 
+def annealing_weight_version1(epoch, start_epoch = 120, end_epoch = 300):
+    if epoch < start_epoch:
+        return 1
+    elif epoch >= start_epoch and epoch < end_epoch:
+        return 1 - (epoch - start_epoch) / (end_epoch - start_epoch)
+    else:
+        return 0
+
+def annealing_weight_version2(epoch, start_epoch = 120, end_epoch = 300):
+    if epoch < start_epoch:
+        return 0
+    else:
+        return min(1, (epoch - start_epoch) / (end_epoch - start_epoch))
+
+def cosine_annealing(epoch, start_epoch = 120, end_epoch = 300):
+    if epoch < start_epoch:
+        return 1
+    else:
+        return 0.5 * (1 + np.cos(4 * np.pi * (epoch - start_epoch) / (end_epoch - start_epoch)))
+   
 def eval_train(epoch, model,soft_labels, all_loss):    
     model.eval()
-    w = annealing_weight(epoch, args.annealing_start_epoch, args.annealing_end_epoch)
+    w = annealing_weight_version1(epoch, args.annealing_start_epoch, args.annealing_end_epoch)
+    # w = annealing_weight_version3(epoch, args.annealing_start_epoch, args.annealing_end_epoch)
+    # w = cosine_annealing(epoch, args.annealing_start_epoch, args.annealing_end_epoch)
+    # w = annealing_weight_version2(epoch, args.annealing_start_epoch, args.annealing_end_epoch)
     losses = torch.zeros(len(eval_loader.dataset))
     targets_all = []
     with torch.no_grad():
@@ -555,7 +581,7 @@ def conformal_prediction_analysis(net, data_loader, q_hat, labeled_pred_idx, unl
     unlabeled_coverage = unlabeled_pred_set[np.arange(unlabeled_pred_set.shape[0]), targets_all[unlabeled_pred_idx]].float().mean()
 
     # Calculate calibration error for labeled and unlabeled data
-    labeled_pred = pred_all[labeled_pred_idx]
+    labeled_pred = pred_all[labeled_pred_idx] 
     unlabeled_pred = pred_all[unlabeled_pred_idx]
     labeled_targets = targets_all[labeled_pred_idx].cuda()  # Move to CUDA
     unlabeled_targets = targets_all[unlabeled_pred_idx].cuda()  # Move to CUDA

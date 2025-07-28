@@ -25,7 +25,6 @@ calibration_alphas=(0.1 0.3)
 cp_weights=(0)
 noise_file=cifar100_split_train_noise_50.pt
 calibration_file=cifar100_split_calibration_noise_50.pt
-
 for calibration_alpha in ${calibration_alphas[@]}; do
   for cp_weight in ${cp_weights[@]}; do
     python Train_cifar.py --data_path ./cifar-100-python --project_name Relabeling_DivideMix_0.95 \
@@ -39,7 +38,7 @@ for calibration_alpha in ${calibration_alphas[@]}; do
 done
 
 ################ method 2:
-# python Train_cifar.py --data_path ./cifar-100-python --project_name Conformal_Prediction \
+# python Train_cifar.py --data_path ./cifar-100-python --project_name Conformal_Prediction \e
 #   --dataset cifar100 --gpuid 1 --num_epochs 300 --batch_size 64 --lr 0.02 --warm_up_epochs 30 --cosine \
 #   --noise_file cifar100_split_train_noise_50.pt --num_class 100 --lambda_u 0.5 --annotator random_label1 \
 #   --calibration_alpha 0.3 --mixmatch --conformal_prediction --cp_weight 0.5 --cp_loss ce --wandb
