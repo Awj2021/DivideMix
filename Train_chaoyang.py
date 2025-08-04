@@ -42,8 +42,9 @@ parser.add_argument('--model', default='resnet34', type=str, help='name of the m
 parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate for learning rate')
 parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
-
+parser.add_argument('--dropout_rate', type=float, default=0.1, help='dropout rate for the model')
 parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
+
 
 args = parser.parse_args()
 
@@ -248,15 +249,24 @@ def create_model():
     #     model = ResNet18(num_classes=args.num_class)
     if args.model == 'resnet18':
         model = models.resnet18(weights='IMAGENET1K_V1')
-        model.fc = nn.Linear(model.fc.in_features,args.num_class)
+        model.fc = nn.Sequential(
+            nn.Dropout(args.dropout_rate),
+            nn.Linear(model.fc.in_features, args.num_class)
+        )
 
     elif args.model == 'resnet34':
         model = models.resnet34(weights='IMAGENET1K_V1')
-        model.fc = nn.Linear(model.fc.in_features,args.num_class)
+        model.fc = nn.Sequential(
+            nn.Dropout(args.dropout_rate),
+            nn.Linear(model.fc.in_features, args.num_class)
+        )
 
     elif args.model == 'resnet50':
         model = models.resnet50(weights='IMAGENET1K_V1')
-        model.fc = nn.Linear(model.fc.in_features, args.num_class)
+        model.fc = nn.Sequential(
+            nn.Dropout(args.dropout_rate),
+            nn.Linear(model.fc.in_features, args.num_class)
+        )
     else:
         raise ValueError('Model not supported.')
     

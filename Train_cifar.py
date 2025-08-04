@@ -32,7 +32,7 @@ parser.add_argument('--num_class', default=10, type=int)
 parser.add_argument('--data_path', default='./cifar-10-batches-py', type=str, help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str)
 parser.add_argument('--project_name', default='DivideMix', type=str, help='name of the wandb project.')
-parser.add_argument('--noise_file', default='Regenerated_Simulated_Human.pt', type=str, help='name of the noise file.')
+parser.add_argument('--noise_file', default='', type=str, help='name of the noise file.')
 parser.add_argument('--num_epochs', default=300, type=int)
 parser.add_argument('--warm_up_epochs', default=30, type=int, help='number of warm-up epochs.')
 parser.add_argument('--wandb', action='store_true', help='use wandb to log the training process.')
@@ -43,7 +43,7 @@ parser.add_argument('-lr_decay_rate', type=float, default=0.1, help='decay rate 
 parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
 parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
-
+parser.add_argument('--dropout_rate', type=float, default=0.1, help='dropout rate for the model')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -145,7 +145,13 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         loss.backward()
         optimizer.step()
 
-        wandb.log({'epoch': epoch, 'num_iter': num_iter, 'Labeled_loss': Lx.item(), 'Unlabeled_loss': Lu.item(), 'loss': loss.item(), 'penalty': penalty.item(), 'lamb': lamb}) if args.wandb else None
+        wandb.log({'train/epoch': epoch, 
+                   'train/num_iter': num_iter, 
+                   'train/Labeled_loss': Lx.item(), 
+                   'train/Unlabeled_loss': Lu.item(), 
+                   'train/loss': loss.item(), 
+                   'train/penalty': penalty.item(), 
+                   'train/lamb': lamb}, step=epoch) if args.wandb else None
 
 def warmup(epoch,net,optimizer,dataloader):
     net.train()
@@ -155,18 +161,13 @@ def warmup(epoch,net,optimizer,dataloader):
         optimizer.zero_grad()
         outputs = net(inputs)               
         loss = CEloss(outputs, labels)      
-        # if args.noise_mode=='asym':  # penalize confident prediction for asymmetric noise
-        #     penalty = conf_penalty(outputs)
-        #     L = loss + penalty      
-        # elif args.noise_mode=='sym':   
         L = loss
         L.backward()  
         optimizer.step() 
-        wandb.log({'  epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
+        wandb.log({'epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
 
 def test(epoch, nets):
     nets = [net.eval() for net in nets]
-    correct = 0
     correct_after_sf = 0
     total = 0
     total_loss = 0.0  # Initialize total loss
@@ -184,21 +185,12 @@ def test(epoch, nets):
             loss = criterion(outputs_after_sf, targets)  # the loss is calculated on the softmax outputs.
             total_loss += loss.item() * targets.size(0)  # Accumulate loss (scaled by batch size)
 
-            _, predicted = torch.max(outputs, 1)
             _, predicted_after_sf = torch.max(outputs_after_sf, 1)
             total += targets.size(0)
-            correct += predicted.eq(targets).cpu().sum().item()
             correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
 
-    acc = 100. * correct / total
     acc_after_sf = 100. * correct_after_sf / total
     avg_loss = total_loss / total  # Calculate average loss
-
-    if acc > best_acc and epoch > warm_up:
-        best_acc = acc
-        best_checkpoint = os.path.join(args.project_name, running_name + '_best.pth')
-        torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
-        print('\nSaving Best Model to %s \n' % best_checkpoint)
 
     if acc_after_sf > best_acc_after_sf and epoch > warm_up:
         best_acc_after_sf = acc_after_sf
@@ -207,12 +199,13 @@ def test(epoch, nets):
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
     # Log metrics to wandb
-    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf, 'Test_Loss': avg_loss}) if args.wandb else None
+    wandb.log({'test/Accuracy': acc_after_sf, 
+               'test/Test_Loss': avg_loss}, step=epoch) if args.wandb else None
 
-    print("\n| Test Epoch #%d\t Loss: %.4f\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%,\n" %
-          (epoch, avg_loss, acc, acc_after_sf))
+    print("\n| Test Epoch #%d\t Loss: %.4f\t w. Softmax Accuracy: %.2f%%,\n" %
+          (epoch, avg_loss, acc_after_sf))
 
-    return acc, acc_after_sf
+    return acc_after_sf
 
 def eval_train(model, eval_loader):  
     """
@@ -256,11 +249,11 @@ class NegEntropy(object):
 
 def create_model():
     if args.model == 'resnet18':
-        model = ResNet18(num_classes=args.num_class)
+        model = ResNet18(num_classes=args.num_class, dropout_rate=args.dropout_rate)
     elif args.model == 'resnet34':
-        model = ResNet34(num_classes=args.num_class)
+        model = ResNet34(num_classes=args.num_class, dropout_rate=args.dropout_rate)
     elif args.model == 'resnet50':
-        model = ResNet50(num_classes=args.num_class)
+        model = ResNet50(num_classes=args.num_class, dropout_rate=args.dropout_rate)
     else:
         raise ValueError('Model not supported.')
     model = model.cuda()
@@ -360,16 +353,11 @@ for epoch in range(start_epoch, args.num_epochs+1):
                 
                 print('\nSaving Checkpoint to %s \n' % latest_checkpoint)
 
-    acc, acc_after_sf = test(epoch, nets)
+    acc_after_sf = test(epoch, nets)
     if epoch > args.num_epochs - 6:
-        last_5_acc.append(acc)
         last_5_acc_after_sf.append(acc_after_sf)
-
         if len(last_5_acc) > 5:
-            last_5_acc.pop(0)
             last_5_acc_after_sf.pop(0)
-    
-        avg_acc_last_5 = sum(last_5_acc) / len(last_5_acc)
         avg_acc_after_sf_last_5 = sum(last_5_acc_after_sf) / len(last_5_acc_after_sf)
 
-        wandb.log({'avg_acc_last_5': avg_acc_last_5, 'avg_acc_after_sf_last_5': avg_acc_after_sf_last_5}) if args.wandb else None
+        wandb.log({'avg_acc_after_sf_last_5': avg_acc_after_sf_last_5}) if args.wandb else None
