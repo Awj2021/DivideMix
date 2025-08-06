@@ -167,20 +167,20 @@ class ResNet(nn.Module):
         return out
 
 
-def ResNet18(num_classes=10):
-    return ResNet(PreActBlock, [2,2,2,2], num_classes=num_classes)
+def ResNet18(num_classes=10, dropout_rate=0.1):
+    return ResNet(PreActBlock, [2,2,2,2], num_classes=num_classes, dropout_rate=dropout_rate)
 
-def ResNet34(num_classes=10):
-    return ResNet(BasicBlock, [3,4,6,3], num_classes=num_classes)
+def ResNet34(num_classes=10, dropout_rate=0.1):
+    return ResNet(BasicBlock, [3,4,6,3], num_classes=num_classes, dropout_rate=dropout_rate)
 
-def ResNet50(num_classes=10):
-    return ResNet(Bottleneck, [3,4,6,3], num_classes=num_classes)
+def ResNet50(num_classes=10, dropout_rate=0.1):
+    return ResNet(Bottleneck, [3,4,6,3], num_classes=num_classes, dropout_rate=dropout_rate)
 
-def ResNet101(num_classes=10):
-    return ResNet(Bottleneck, [3,4,23,3], num_classes=num_classes)
+def ResNet101(num_classes=10, dropout_rate=0.1):
+    return ResNet(Bottleneck, [3,4,23,3], num_classes=num_classes, dropout_rate=dropout_rate)
 
-def ResNet152(num_classes=10):
-    return ResNet(Bottleneck, [3,8,36,3], num_classes=num_classes)
+def ResNet152(num_classes=10, dropout_rate=0.1):
+    return ResNet(Bottleneck, [3,8,36,3], num_classes=num_classes, dropout_rate=dropout_rate)
 
 
 def test():

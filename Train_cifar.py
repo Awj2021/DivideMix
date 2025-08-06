@@ -15,6 +15,7 @@ import dataloader_cifar as dataloader
 import wandb
 import math
 import torch.nn.functional as F
+from torchmetrics import Accuracy, MeanMetric
 
  
 parser = argparse.ArgumentParser(description='PyTorch CIFAR Training')
@@ -44,6 +45,7 @@ parser.add_argument('--cosine', action='store_true', default=False,
                     help='use cosine lr schedule')
 parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
 parser.add_argument('--dropout_rate', type=float, default=0.1, help='dropout rate for the model')
+parser.add_argument('--idn_type', type=str, default='idn50', choices=['idn50', 'idn30', 'idn70'], help='type of idn settings.')
 args = parser.parse_args()
 
 torch.cuda.set_device(args.gpuid)
@@ -65,13 +67,21 @@ elif args.annotator == 'six_annotators':
 else:
     raise ValueError('The annotator should be specified {}.'.format(args.annotator))
 
-running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.lambda_u) + '_' + str(len(annotators))
-wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
+# running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_' + str(args.lambda_u) + '_' + str(len(annotators))
+wandb.init(project=args.project_name, config=args) if args.wandb else None
+running_name = wandb.run.name
 
 # Training
 def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     net.train()
     net2.eval() #fix one network and train the other
+    
+    # Initialize torchmetrics for epoch tracking
+    labeled_loss_metric = MeanMetric().cuda()
+    unlabeled_loss_metric = MeanMetric().cuda()
+    total_loss_metric = MeanMetric().cuda()
+    penalty_metric = MeanMetric().cuda()
+    lamb_metric = MeanMetric().cuda()
       
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
@@ -145,17 +155,31 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         loss.backward()
         optimizer.step()
 
-        wandb.log({'train/epoch': epoch, 
-                   'train/num_iter': num_iter, 
-                   'train/Labeled_loss': Lx.item(), 
-                   'train/Unlabeled_loss': Lu.item(), 
-                   'train/loss': loss.item(), 
-                   'train/penalty': penalty.item(), 
-                   'train/lamb': lamb}, step=epoch) if args.wandb else None
+        # Update metrics
+        labeled_loss_metric.update(Lx)
+        unlabeled_loss_metric.update(Lu)
+        total_loss_metric.update(loss)
+        penalty_metric.update(penalty)
+        lamb_metric.update(torch.tensor(lamb).cuda())
+
+    # Log epoch-level metrics to wandb
+    if args.wandb:
+        wandb.log({
+            'train/epoch': epoch,
+            'train/Labeled_loss': labeled_loss_metric.compute().item(),
+            'train/Unlabeled_loss': unlabeled_loss_metric.compute().item(),
+            'train/loss': total_loss_metric.compute().item(),
+            'train/penalty': penalty_metric.compute().item(),
+            'train/lamb': lamb_metric.compute().item()
+        }, step=epoch)
 
 def warmup(epoch,net,optimizer,dataloader):
     net.train()
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
+    
+    # Initialize torchmetrics for epoch tracking
+    ce_loss_metric = MeanMetric().cuda()
+    
     for batch_idx, (inputs, labels, index) in enumerate(dataloader):      
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
@@ -164,13 +188,23 @@ def warmup(epoch,net,optimizer,dataloader):
         L = loss
         L.backward()  
         optimizer.step() 
-        wandb.log({'epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
+        
+        # Update metrics
+        ce_loss_metric.update(loss)
+    
+    # Log epoch-level metrics to wandb
+    if args.wandb:
+        wandb.log({
+            'warmup/epoch': epoch, 
+            'warmup/CE_loss': ce_loss_metric.compute().item()
+        }, step=epoch)
 
 def test(epoch, nets):
     nets = [net.eval() for net in nets]
-    correct_after_sf = 0
-    total = 0
-    total_loss = 0.0  # Initialize total loss
+    
+    # Initialize torchmetrics for epoch tracking
+    accuracy_metric = Accuracy(task='multiclass', num_classes=args.num_class).cuda()
+    loss_metric = MeanMetric().cuda()
     criterion = nn.CrossEntropyLoss()  # Define the loss function
     global best_acc, best_acc_after_sf
 
@@ -183,24 +217,27 @@ def test(epoch, nets):
 
             # Calculate loss for the current batch
             loss = criterion(outputs_after_sf, targets)  # the loss is calculated on the softmax outputs.
-            total_loss += loss.item() * targets.size(0)  # Accumulate loss (scaled by batch size)
+            
+            # Update metrics
+            loss_metric.update(loss)
+            accuracy_metric.update(outputs_after_sf, targets)
 
-            _, predicted_after_sf = torch.max(outputs_after_sf, 1)
-            total += targets.size(0)
-            correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
-
-    acc_after_sf = 100. * correct_after_sf / total
-    avg_loss = total_loss / total  # Calculate average loss
+    # Compute final metrics
+    acc_after_sf = accuracy_metric.compute().item() * 100  # Convert to percentage
+    avg_loss = loss_metric.compute().item()
 
     if acc_after_sf > best_acc_after_sf and epoch > warm_up:
         best_acc_after_sf = acc_after_sf
-        best_checkpoint = os.path.join(args.project_name, 'after_sf_' + running_name + '_best.pth')
+        best_checkpoint = os.path.join(args.project_name, args.idn_type, running_name + '_best.pth')
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
     # Log metrics to wandb
-    wandb.log({'test/Accuracy': acc_after_sf, 
-               'test/Test_Loss': avg_loss}, step=epoch) if args.wandb else None
+    if args.wandb:
+        wandb.log({
+            'test/Accuracy': acc_after_sf, 
+            'test/Test_Loss': avg_loss
+        }, step=epoch)
 
     print("\n| Test Epoch #%d\t Loss: %.4f\t w. Softmax Accuracy: %.2f%%,\n" %
           (epoch, avg_loss, acc_after_sf))
@@ -292,10 +329,9 @@ CEloss = nn.CrossEntropyLoss()
 
 best_acc = 0
 best_acc_after_sf = 0
-if not os.path.exists(args.project_name):
-    os.makedirs(args.project_name)
+os.makedirs(os.path.join(args.project_name, args.idn_type), exist_ok=True)
 
-latest_checkpoint = os.path.join(args.project_name, running_name + '_' + 'latest.pth')
+latest_checkpoint = os.path.join(args.project_name, args.idn_type, running_name + '_latest.pth')
 
 if args.resume:
     if os.path.isfile(latest_checkpoint):
