@@ -13,4 +13,4 @@ set -e
 # annotator=$1
 # lambda_u=$1
 python Train_cifar.py --data_path ./cifar-100-python --project_name Dividemix_Random_Cifar100 --dataset cifar100 --gpuid 0  --num_epochs 300 --batch_size 64 --lr 0.02 \
-    --warm_up_epochs 30 --cosine --lambda_u 150 --noise_file cifar100_noisy_labels_noise_70.pt --num_class 100 --annotator three_annotators --idn_type idn70 --dropout_rate 0.1 --wandb
+    --warm_up_epochs 30 --cosine --lambda_u 50 --noise_file cifar100_noisy_labels_noise_70.pt --num_class 100 --annotator three_annotators --idn_type idn70 --dropout_rate 0.1 --wandb

@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-import torchvision
 import torchvision.models as models
 import random
 import os
@@ -18,6 +17,7 @@ import ipdb
 import math
 import torch.nn.functional as F
 from tqdm import tqdm 
+from torchmetrics import Accuracy, MeanMetric
 
  
 parser = argparse.ArgumentParser(description='PyTorch Dopanim Training')
@@ -69,9 +69,14 @@ running_name = args.dataset + '_' + args.model + '_' + str(args.batch_size) + '_
 wandb.init(project=args.project_name, name=running_name, config=args) if args.wandb else None
 
 # Training
-def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
+def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, net_name):
     net.train()
     net2.eval() #fix one network and train the other
+    
+    # Initialize torchmetrics for epoch tracking
+    labeled_loss_metric = MeanMetric().cuda()
+    total_loss_metric = MeanMetric().cuda()
+    penalty_metric = MeanMetric().cuda()
       
     unlabeled_train_iter = iter(unlabeled_trainloader)    
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
@@ -129,8 +134,13 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         mixed_target = l * target_a[:batch_size*2] + (1 - l) * target_b[:batch_size*2]
                 
         logits = net(mixed_input)
+        logits_x = logits[:batch_size*2]  # shape: (2*batch_size, num_class)
+        logits_u = net(mixed_input[batch_size*2:])  # shape:
         
-        Lx = -torch.mean(torch.sum(F.log_softmax(logits, dim=1) * mixed_target, dim=1))
+        # Lx = -torch.mean(torch.sum(F.log_softmax(logits, dim=1) * mixed_target, dim=1))
+        # here, why not use the semi-supervised loss for training?
+        
+        Lx, Lu, lamb = criterion(logits_x, mixed_target[:batch_size*2], logits_u, mixed_target[batch_size*2:], epoch+batch_idx/num_iter, warm_up)
         
         # regularization
         prior = torch.ones(args.num_class)/args.num_class
@@ -138,18 +148,36 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
         pred_mean = torch.softmax(logits, dim=1).mean(0)
         penalty = torch.sum(prior*torch.log(prior/pred_mean))
        
-        loss = Lx + penalty
+        # loss = Lx + penalty
+        loss = Lx + lamb * Lu  + penalty
         
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        wandb.log({"train_loss": loss.item(), "labeled_loss": Lx.item(), "penalty": penalty.item()}) if args.wandb else None
+        
+        # Update metrics
+        labeled_loss_metric.update(Lx)
+        total_loss_metric.update(loss)
+        penalty_metric.update(penalty)
+
+    # Log epoch-level metrics to wandb
+    if args.wandb:
+        wandb.log({
+            'train/epoch': epoch,
+            f'train/{net_name}_labeled_loss': labeled_loss_metric.compute().item(),
+            f'train/{net_name}_loss': total_loss_metric.compute().item(),
+            f'train/{net_name}_penalty': penalty_metric.compute().item()
+        }, step=epoch)
 
 
-def warmup(epoch,net,optimizer,dataloader):
+def warmup(epoch,net,optimizer,dataloader, net_name):
     net.train()
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
+    
+    # Initialize torchmetrics for epoch tracking
+    ce_loss_metric = MeanMetric().cuda()
+    
     for batch_idx, (inputs, labels, path, index) in tqdm(enumerate(dataloader)):      
         inputs, labels = inputs.cuda(), labels.cuda() 
         optimizer.zero_grad()
@@ -158,35 +186,45 @@ def warmup(epoch,net,optimizer,dataloader):
         L = loss
         L.backward()  
         optimizer.step() 
-        wandb.log({'  epoch': epoch, 'num_iter': batch_idx, 'CE_loss': loss.item()}) if args.wandb else None
+        
+        # Update metrics
+        ce_loss_metric.update(loss)
+    
+    # Log epoch-level metrics to wandb
+    if args.wandb:
+        wandb.log({
+            f'warmup/{net_name}_ce_loss': ce_loss_metric.compute().item()
+        }, step=epoch)
 
 
 def test(epoch, nets):
     nets = [net.eval() for net in nets]
-    correct = 0
-    correct_after_sf = 0
-    total = 0
-    test_loss = 0  # Initialize test loss
+    
+    # Initialize torchmetrics for epoch tracking
+    accuracy_metric = Accuracy(task='multiclass', num_classes=args.num_class).cuda()
+    accuracy_after_sf_metric = Accuracy(task='multiclass', num_classes=args.num_class).cuda()
+    loss_metric = MeanMetric().cuda()
     global best_acc, best_acc_after_sf
+    
     with torch.no_grad():
         for batch_idx, (inputs, targets) in tqdm(enumerate(test_loader)):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs_all = [net(inputs) for net in nets]
             outputs = sum(outputs_all)
             outputs_after_sf = sum([torch.softmax(output, dim=1) for output in outputs_all])/len(outputs_all)
-            _, predicted = torch.max(outputs, 1)            
-            _, predicted_after_sf = torch.max(outputs_after_sf, 1)           
-            total += targets.size(0)
-            correct += predicted.eq(targets).cpu().sum().item() 
-            correct_after_sf += predicted_after_sf.eq(targets).cpu().sum().item()
             
             # Calculate loss for the current batch
             loss = CEloss(outputs, targets)
-            test_loss += loss.item() * targets.size(0)  # Accumulate loss
+            
+            # Update metrics
+            loss_metric.update(loss)
+            accuracy_metric.update(outputs, targets)
+            accuracy_after_sf_metric.update(outputs_after_sf, targets)
 
-    acc = 100.*correct/total
-    acc_after_sf = 100.*correct_after_sf/total
-    test_loss /= total  # Average test loss
+    # Compute final metrics
+    acc = accuracy_metric.compute().item() * 100  # Convert to percentage
+    acc_after_sf = accuracy_after_sf_metric.compute().item() * 100  # Convert to percentage
+    test_loss = loss_metric.compute().item()
 
     if acc > best_acc and epoch>warm_up:
         best_acc = acc
@@ -200,8 +238,17 @@ def test(epoch, nets):
         torch.save({f'net{i+1}': net.state_dict() for i, net in enumerate(nets)}, best_checkpoint)
         print('\nSaving Best Model to %s \n' % best_checkpoint)
 
-    wandb.log({'epoch': epoch, 'Accuracy_wo_sf': acc, 'Accuracy_w_sf': acc_after_sf, 'Test_Loss': test_loss,
-               'Acc_Best_wo_sf': best_acc, "Acc_Best_w_sf": best_acc_after_sf}) if args.wandb else None
+    # Log metrics to wandb
+    if args.wandb:
+        wandb.log({
+            'test/epoch': epoch, 
+            'test/Accuracy_wo_sf': acc, 
+            'test/Accuracy_w_sf': acc_after_sf, 
+            'test/Test_Loss': test_loss,
+            'test/Acc_Best_wo_sf': best_acc, 
+            'test/Acc_Best_w_sf': best_acc_after_sf
+        }, step=epoch)
+    
     print("\n| Test Epoch #%d\t w/o. Softmax Accuracy: %.2f%%, w. Softmax Accuracy: %.2f%%, Test Loss: %.4f\n" 
           % (epoch, acc, acc_after_sf, test_loss))  
 
@@ -216,12 +263,14 @@ def eval_train(model, eval_loader):
     num_samples = len(eval_loader.dataset)
     losses = torch.zeros(num_samples) # actually, the size of the dataset should be changed.    
     paths = []
+    # Create a CrossEntropyLoss with reduction='none' to get per-sample losses
+    # CE_none = nn.CrossEntropyLoss(reduction='none')
     with torch.no_grad():
         for batch_idx, (inputs, targets, path, index) in enumerate(eval_loader):
             # ipdb.set_trace()
             inputs, targets = inputs.cuda(), targets.cuda() 
             outputs = model(inputs) 
-            loss = CE(outputs, targets)  
+            loss = CE_none(outputs, targets)  # This will return a tensor with shape (batch_size,)
             for b in range(inputs.size(0)):
                 losses[index[b]]=loss[b] 
                 paths.append(path[b])
@@ -286,6 +335,15 @@ def adjust_learning_rate(args, optimizer, epoch):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
+class SemiLoss(object):
+    def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, warm_up):
+        probs_u = torch.softmax(outputs_u, dim=1)
+
+        Lx = -torch.mean(torch.sum(F.log_softmax(outputs_x, dim=1) * targets_x, dim=1))
+        Lu = torch.mean((probs_u - targets_u)**2)
+
+        return Lx, Lu, linear_rampup(epoch,warm_up)
+
 warm_up = args.warm_up_epochs
 loader = dataloader.chaoyang_dataloader(batch_size=args.batch_size, num_workers=5, root=args.data_path)
 
@@ -295,8 +353,9 @@ nets = [create_model() for _ in range(len(annotators))]
 cudnn.benchmark = True
 
 optimizers = [optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4) for net in nets]
-CE = nn.CrossEntropyLoss(reduction='none')
+CE_none = nn.CrossEntropyLoss(reduction='none')
 CEloss = nn.CrossEntropyLoss()
+criterion = SemiLoss()
 
 best_acc = 0
 best_acc_after_sf = 0
@@ -339,7 +398,7 @@ for epoch in range(start_epoch, args.num_epochs+1):
         warmup_trainloaders = [loader.run('warmup', annotator=annotators[i]) for i in range(len(annotators))]
         for i, (net, optimizer, warmup_trainloader) in enumerate(zip(nets, optimizers, warmup_trainloaders)):
             print(f'Warmup Net{i+1}: ')
-            warmup(epoch, net, optimizer, warmup_trainloader) # logits: (batch_size*num_iteration, num_class)
+            warmup(epoch, net, optimizer, warmup_trainloader, net_name=annotators[i]) # logits: (batch_size*num_iteration, num_class)
     else:
         for i in range(num_networks):
             model_choices = list(range(num_networks))
@@ -350,7 +409,7 @@ for epoch in range(start_epoch, args.num_epochs+1):
             pred = (prob > args.p_threshold)
             print('\n Student Network: ', i, ' Teacher Network: ', model_choice)
             labeled_trainloader, unlabeled_trainloader = loader.run('train',annotators[i], pred, prob, paths) # co-divide
-            train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader)
+            train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader, net_name=annotators[i])
 
         # Save the model as the latest one. 
         if epoch % 10 == 0:

@@ -55,7 +55,8 @@ torch.cuda.manual_seed_all(args.seed)
 
 if not os.path.exists(args.data_path):
     os.makedirs(args.data_path)
-
+if args.annotator == 'two_annotators':
+    annotators = ['random_label1', 'random_label2']
 if args.annotator == 'three_annotators':
     annotators = ['random_label1', 'random_label2', 'random_label3']
 elif args.annotator == 'four_annotators':
@@ -72,7 +73,7 @@ wandb.init(project=args.project_name, config=args) if args.wandb else None
 running_name = wandb.run.name
 
 # Training
-def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
+def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader, net_name):
     net.train()
     net2.eval() #fix one network and train the other
     
@@ -166,14 +167,14 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     if args.wandb:
         wandb.log({
             'train/epoch': epoch,
-            'train/Labeled_loss': labeled_loss_metric.compute().item(),
-            'train/Unlabeled_loss': unlabeled_loss_metric.compute().item(),
-            'train/loss': total_loss_metric.compute().item(),
-            'train/penalty': penalty_metric.compute().item(),
-            'train/lamb': lamb_metric.compute().item()
+            f'train/{net_name}_labeled_loss': labeled_loss_metric.compute().item(),
+            f'train/{net_name}_unlabeled_loss': unlabeled_loss_metric.compute().item(),
+            f'train/{net_name}_loss': total_loss_metric.compute().item(),
+            f'train/{net_name}_penalty': penalty_metric.compute().item(),
+            f'train/{net_name}_lamb': lamb_metric.compute().item()
         }, step=epoch)
 
-def warmup(epoch,net,optimizer,dataloader):
+def warmup(epoch,net,optimizer,dataloader, net_name):
     net.train()
     num_iter = (len(dataloader.dataset)//dataloader.batch_size)+1
     
@@ -195,8 +196,7 @@ def warmup(epoch,net,optimizer,dataloader):
     # Log epoch-level metrics to wandb
     if args.wandb:
         wandb.log({
-            'warmup/epoch': epoch, 
-            'warmup/CE_loss': ce_loss_metric.compute().item()
+            f'warmup/{net_name}_ce_loss': ce_loss_metric.compute().item()
         }, step=epoch)
 
 def test(epoch, nets):
@@ -364,7 +364,7 @@ for epoch in range(start_epoch, args.num_epochs+1):
         warmup_trainloaders = [loader.run('warmup', annotator=annotators[i]) for i in range(len(annotators))]
         for i, (net, optimizer, warmup_trainloader) in enumerate(zip(nets, optimizers, warmup_trainloaders)):
             print(f'Warmup Net{i+1}: ')
-            warmup(epoch, net, optimizer, warmup_trainloader)       
+            warmup(epoch, net, optimizer, warmup_trainloader, net_name=annotators[i])       
    
     else:
         for i in range(len(annotators)):
@@ -376,7 +376,7 @@ for epoch in range(start_epoch, args.num_epochs+1):
             pred = (prob > args.p_threshold)
             print('\n Train Net%d' % (i+1))
             labeled_trainloader, unlabeled_trainloader = loader.run('train',pred,prob,annotator=annotators[i]) # co-divide
-            train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader)
+            train(epoch, nets[i], nets[model_choice], optimizers[i], labeled_trainloader, unlabeled_trainloader, net_name=annotators[i])
             # Save the model as the latest one. 
             if epoch % 10 == 0:
                 torch.save({
