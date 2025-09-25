@@ -69,10 +69,10 @@ def train(epoch,net,net2,optimizer,labeled_trainloader,unlabeled_trainloader):
     num_iter = (len(labeled_trainloader.dataset)//args.batch_size)+1
     for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_trainloader):  # labels_x is the target label.    
         try:
-            inputs_u, inputs_u2 = unlabeled_train_iter.next()
+            inputs_u, inputs_u2 = next(unlabeled_train_iter)
         except:
             unlabeled_train_iter = iter(unlabeled_trainloader)
-            inputs_u, inputs_u2 = unlabeled_train_iter.next()          # Get two different unlabeled samples.But from the dataloader, the images are the same.       
+            inputs_u, inputs_u2 = next(unlabeled_train_iter)          # Get two different unlabeled samples.But from the dataloader, the images are the same.       
         batch_size = inputs_x.size(0)
         
         # Transform label to one-hot
@@ -427,7 +427,7 @@ loader = dataloader.cifar_dataloader(args.dataset, r=args.r, noise_mode=args.noi
 calibration_loader = dataloader.cifar_calibration_dataloader(args.dataset, root_dir=args.data_path, 
                                                              mode='calibration', batch_size=args.batch_size, 
                                                              num_workers=5, noise_file=args.calibration_file, 
-                                                             annotator=args.annotator).run()
+                                                             annotator=args.annotator, clean_or_noisy='clean').run()
 test_loader = loader.run('test')
 eval_loader = loader.run('eval_train')
 

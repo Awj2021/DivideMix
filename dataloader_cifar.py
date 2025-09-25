@@ -81,7 +81,7 @@ class cifar_dataset(Dataset):
             elif self.mode == 'train_conformal':
                 self.train_data = train_data
                 # self.train_clean_label = train_clean_label
-                self.train_clean_label = multi_rater['clean_label']
+                self.train_clean_label = multi_rater['clean_label'] # using the clean label for conformal prediction.
             else:                   
                 if self.mode == "labeled":
                     pred_idx = pred.nonzero()[0]

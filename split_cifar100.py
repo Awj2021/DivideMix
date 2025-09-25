@@ -4,7 +4,6 @@ import torch
 from PIL import Image
 import random
 import argparse
-import ipdb
 import numpy as np
 
 
@@ -15,7 +14,7 @@ def unpickle(file):
         dict = cPickle.load(fo, encoding='latin1')
     return dict
 
-def split_cifar100(data_path, label_file, split_ratio=0.8, seed=42):
+def split_cifar100(data_path, label_file, output_dir, idn_ratio, split_ratio=0.8, seed=42):
     """
     Split CIFAR-100 training data into train and calibration sets,
     preserving all annotator labels from the .pt file.
@@ -44,7 +43,7 @@ def split_cifar100(data_path, label_file, split_ratio=0.8, seed=42):
     train_original_labels = train_dict['fine_labels']
     
     # Load all annotator labels from the .pt file
-    multi_rater = torch.load(label_file)
+    multi_rater = torch.load(os.path.join(data_path, label_file))
     print(f"Available annotators in label file: {list(multi_rater.keys())}")
     
     # Create indices for all samples
@@ -66,16 +65,9 @@ def split_cifar100(data_path, label_file, split_ratio=0.8, seed=42):
     calibration_labels = {key: np.array([values[i] for i in calibration_indices]) for key, values in multi_rater.items()}
     calibration_labels['indices'] = calibration_indices
 
-    # Save the split data
-    output_dir = os.path.dirname(label_file)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    train_file = os.path.join(output_dir, f'cifar100_split_train_noise_{idn_ratio}_{split_ratio}.pt')
+    calibration_file = os.path.join(output_dir, f'cifar100_split_calibration_noise_{idn_ratio}_{split_ratio}.pt')
 
-    # ipdb.set_trace()
-    
-    train_file = os.path.join(output_dir, 'cifar100_split_train_noise_50.pt')
-    calibration_file = os.path.join(output_dir, 'cifar100_split_calibration_noise_50.pt')
-    
     torch.save(train_labels, train_file)
     torch.save(calibration_labels, calibration_file)
     
@@ -88,13 +80,15 @@ if __name__ == "__main__":
                         help='Path to the .pt file containing annotator labels')
     parser.add_argument('--output_dir', type=str, default='./cifar100_split',
                         help='Directory to save the split data')
-    parser.add_argument('--split_ratio', type=float, default=0.8,
+    parser.add_argument('--split_ratio', type=float, default=0.9,
                         help='Ratio of data to use for training (default: 0.9)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducibility')
+    parser.add_argument('--idn_noise_rate', type=int, default=50,
+                        help='Noise rate for IDN (default: 50)')
     
     args = parser.parse_args()
 
-    split_cifar100(args.data_path, args.label_file, args.split_ratio, args.seed)
+    split_cifar100(args.data_path, args.label_file, args.output_dir, args.idn_noise_rate, args.split_ratio, args.seed)
     print(f"Data split completed. Train and calibration sets saved to {args.output_dir}.")
     
